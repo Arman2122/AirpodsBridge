@@ -1,0 +1,19 @@
+<RCC>
+    <qresource prefix="/Resource">
+        <file>Image/Icon.svg</file>
+        <file>Video/AirPods_1.avi</file>
+        <file>Video/AirPods_2.avi</file>
+        <file>Video/AirPods_3.avi</file>
+        <file>Video/AirPods_4.avi</file>
+        <file>Video/AirPods_4_ANC.avi</file>
+        <file>Video/AirPods_Pro.avi</file>
+        <file>Video/AirPods_Pro_2.avi</file>
+        <file>Video/AirPods_Pro_3.avi</file>
+        <file>Video/AirPods_Max.avi</file>
+        <file>Video/Beats_Fit_Pro.avi</file>
+        <file>Font/Inter-Regular.ttf</file>
+        <file>Font/Inter-Medium.ttf</file>
+        <file>Font/Inter-SemiBold.ttf</file>
+        <file>Font/InterDisplay-SemiBold.ttf</file>
+    </qresource>
+</RCC>

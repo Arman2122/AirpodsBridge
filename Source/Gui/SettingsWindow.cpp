@@ -1,0 +1,406 @@
+// SPDX-FileCopyrightText: 2026 Arman2122
+// SPDX-License-Identifier: MIT
+
+#include "Source/Gui/SettingsWindow.h"
+
+#include <QLabel>
+#include <QToolTip>
+#include <QCheckBox>
+#include <QPushButton>
+#include <QMessageBox>
+#include <QDesktopServices>
+
+#include <Config.h>
+
+#include "Source/Core/Debug.h"
+
+using namespace std::chrono_literals;
+
+namespace Gui {
+
+class TipLabel : public QLabel
+{
+    Q_OBJECT
+
+private:
+    constexpr static auto content = "(?)";
+
+public:
+    TipLabel(QString text, QWidget *parent) : QLabel{content, parent}, _text{std::move(text)}
+    {
+        QPalette palette = this->palette();
+        palette.setColor(QPalette::WindowText, Qt::darkGray);
+        setPalette(palette);
+    }
+
+private:
+    QString _text;
+
+    void enterEvent(QEvent *event) override
+    {
+        QToolTip::showText(QCursor::pos(), _text, this);
+    }
+
+    void leaveEvent(QEvent *event) override
+    {
+        QToolTip::hideText();
+    }
+};
+
+SettingsWindow::SettingsWindow(Core::QuickConnect::Controller &quickConnect, QWidget *parent)
+    : QDialog{parent}, _quickConnect{quickConnect}
+{
+    const auto &constMetaFields = GetConstMetaFields();
+
+    _ui.setupUi(this);
+
+    auto debugTabIndex = _ui.tabWidget->count() - 1;
+    APB_ASSERT(_ui.tabWidget->tabText(debugTabIndex) == "Debug");
+#if !defined APB_DEBUG
+    _ui.tabWidget->setTabVisible(debugTabIndex, false);
+#else
+    connect(
+        _ui.cbAdvOverride, &QCheckBox::toggled, this, &SettingsWindow::On_cbAdvOverride_toggled);
+
+    connect(
+        _ui.teAdvOverride, &QTextEdit::textChanged, this,
+        &SettingsWindow::On_teAdvOverride_textChanged);
+#endif
+
+    InitCreditsText();
+
+    auto versionText =
+        QString{"<a href=\"%1\">v%2</a>"}.arg(Config::UrlCurrentRelease).arg(CONFIG_VERSION_STRING);
+#if defined APB_BUILD_GIT_HASH
+    versionText +=
+        QString{" (<a href=\"%1\">%2</a>)"}
+            .arg(QString{"%1/commit/%2"}.arg(Config::UrlRepository).arg(APB_BUILD_GIT_HASH))
+            .arg(QString{APB_BUILD_GIT_HASH}.left(7));
+#endif
+    _ui.lbVersion->setText(versionText);
+
+    _ui.hlTipAutoEarDetection->addWidget(
+        new TipLabel{constMetaFields.automatic_ear_detection.Description(), this});
+
+    _ui.hlTipTrayQuickConnect->addWidget(
+        new TipLabel{constMetaFields.tray_quick_connect_enabled.Description(), this});
+
+    _ui.hsMaxReceivingRange->setMinimum(50);
+    _ui.hsMaxReceivingRange->setMaximum(100);
+
+    connect(&_quickConnect, &Core::QuickConnect::Controller::DevicesChanged, this, [this] {
+        UpdateQuickConnectDevices(GetCurrent());
+    });
+
+    Update(GetCurrent(), false);
+
+    connect(
+        _ui.buttonBox->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked, this,
+        &SettingsWindow::RestoreDefaults);
+
+    connect(_ui.cbAutoRun, &QCheckBox::toggled, this, [this](bool checked) {
+        if (_trigger) {
+            On_cbAutoRun_toggled(checked);
+        }
+    });
+
+    connect(_ui.cbTrayQuickConnectEnabled, &QCheckBox::toggled, this, [this](bool checked) {
+        if (_trigger) {
+            On_cbTrayQuickConnectEnabled_toggled(checked);
+        }
+    });
+
+    connect(
+        _ui.cbTrayQuickConnectDevice, qOverload<int>(&QComboBox::currentIndexChanged), this,
+        [this](int index) {
+            if (_trigger) {
+                On_cbTrayQuickConnectDevice_currentIndexChanged(index);
+            }
+        });
+
+    connect(_ui.cbAutoEarDetection, &QCheckBox::toggled, this, [this](bool checked) {
+        if (_trigger) {
+            On_cbAutoEarDetection_toggled(checked);
+        }
+    });
+
+    connect(_ui.hsMaxReceivingRange, &QSlider::valueChanged, this, [this](int value) {
+        if (_trigger) {
+            On_hsMaxReceivingRange_valueChanged(value);
+        }
+    });
+
+    connect(
+        _ui.rbDisplayBatteryOnTrayIconDisable, &QRadioButton::toggled, this, [this](bool checked) {
+            if (_trigger) {
+                On_cbDisplayBatteryOnTrayIcon_toggled(TrayIconBatteryBehavior::Disable);
+            }
+        });
+
+    connect(
+        _ui.rbDisplayBatteryOnTrayIconWhenLowBattery, &QRadioButton::toggled, this,
+        [this](bool checked) {
+            if (_trigger) {
+                On_cbDisplayBatteryOnTrayIcon_toggled(TrayIconBatteryBehavior::WhenLowBattery);
+            }
+        });
+
+    connect(
+        _ui.rbDisplayBatteryOnTrayIconAlways, &QRadioButton::toggled, this, [this](bool checked) {
+            if (_trigger) {
+                On_cbDisplayBatteryOnTrayIcon_toggled(TrayIconBatteryBehavior::Always);
+            }
+        });
+
+    connect(
+        _ui.rbDisplayBatteryOnTaskbarDisable, &QRadioButton::toggled, this, [this](bool checked) {
+            if (_trigger) {
+                On_cbDisplayBatteryOnTaskbar_toggled(TaskbarStatusBehavior::Disable);
+            }
+        });
+
+    connect(_ui.rbDisplayBatteryOnTaskbarText, &QRadioButton::toggled, this, [this](bool checked) {
+        if (_trigger) {
+            On_cbDisplayBatteryOnTaskbar_toggled(TaskbarStatusBehavior::Text);
+        }
+    });
+
+    connect(_ui.rbDisplayBatteryOnTaskbarIcon, &QRadioButton::toggled, this, [this](bool checked) {
+        if (_trigger) {
+            On_cbDisplayBatteryOnTaskbar_toggled(TaskbarStatusBehavior::Icon);
+        }
+    });
+
+    connect(_ui.pbUnbind, &QPushButton::clicked, this, [this]() {
+        if (_trigger) {
+            On_pbUnbind_clicked();
+        }
+    });
+
+    connect(_ui.pbOpenLogsDirectory, &QPushButton::clicked, this, [this]() {
+        if (_trigger) {
+            On_pbOpenLogsDirectory_clicked();
+        }
+    });
+}
+
+int SettingsWindow::GetTabCount() const
+{
+    return _ui.tabWidget->count();
+}
+
+int SettingsWindow::GetTabCurrentIndex() const
+{
+    return _ui.tabWidget->currentIndex();
+}
+
+int SettingsWindow::GetTabLastVisibleIndex() const
+{
+    return GetTabCount() - 2 /* Skip the Debug tab */;
+}
+
+void SettingsWindow::SetTabIndex(int index)
+{
+    _ui.tabWidget->setCurrentIndex(index);
+}
+
+void SettingsWindow::InitCreditsText()
+{
+    static QString libs = [] {
+        struct LibInfo {
+            const char *name, *url, *license, *licenseUrl;
+        };
+        static std::vector<LibInfo> libs{
+            // clang-format off
+            { "Qt 5", "https://www.qt.io/download-qt-installer", "LGPLv3", "https://doc.qt.io/qt-5/lgpl.html" },
+            { "spdlog", "https://github.com/gabime/spdlog", "MIT", "https://github.com/gabime/spdlog/blob/v1.x/LICENSE" },
+            { "cxxopts", "https://github.com/jarro2783/cxxopts", "MIT", "https://github.com/jarro2783/cxxopts/blob/master/LICENSE" },
+            { "cpr", "https://github.com/whoshuu/cpr", "MIT", "https://github.com/whoshuu/cpr/blob/master/LICENSE" },
+            { "json", "https://github.com/nlohmann/json", "MIT", "https://github.com/nlohmann/json/blob/develop/LICENSE.MIT" },
+            { "SingleApplication", "https://github.com/itay-grudev/SingleApplication", "MIT", "https://github.com/itay-grudev/SingleApplication/blob/master/LICENSE" },
+            { "pfr", "https://github.com/boostorg/pfr", "BSL-1.0", "https://github.com/boostorg/pfr/blob/develop/LICENSE_1_0.txt" },
+            { "magic_enum", "https://github.com/Neargye/magic_enum", "MIT", "https://github.com/Neargye/magic_enum/blob/master/LICENSE" },
+            { "stacktrace", "https://github.com/boostorg/stacktrace", "BSL-1.0", "https://www.boost.org/LICENSE_1_0.txt" } // clang-format on
+        };
+
+        QString result;
+        for (const auto &lib : libs) {
+            result += QString{"<br> - <a href=\"%2\">%1</a> (<a href=\"%4\">%3 License</a>)"}
+                          .arg(lib.name)
+                          .arg(lib.url)
+                          .arg(lib.license)
+                          .arg(lib.licenseUrl);
+        }
+        return result;
+    }();
+    _ui.tbCredits->setHtml(tr("Third-Party Libraries:") + libs);
+}
+
+void SettingsWindow::RestoreDefaults()
+{
+    Save(GetDefault());
+    Update(GetCurrent(), false);
+}
+
+void SettingsWindow::Update(const Fields &fields, bool trigger)
+{
+    _trigger = trigger;
+
+    _ui.cbAutoRun->setChecked(fields.auto_run);
+
+    _ui.cbAutoEarDetection->setChecked(fields.automatic_ear_detection);
+
+    _ui.hsMaxReceivingRange->setValue(-fields.rssi_min);
+
+    auto [batteryOnTrayIconDisable, batteryOnTrayIconWhenLowBattery, batteryOnTrayIconAlways] =
+        std::make_tuple(
+            fields.tray_icon_battery == TrayIconBatteryBehavior::Disable,
+            fields.tray_icon_battery == TrayIconBatteryBehavior::WhenLowBattery,
+            fields.tray_icon_battery == TrayIconBatteryBehavior::Always);
+
+    _ui.rbDisplayBatteryOnTrayIconDisable->setChecked(batteryOnTrayIconDisable);
+    _ui.rbDisplayBatteryOnTrayIconWhenLowBattery->setChecked(batteryOnTrayIconWhenLowBattery);
+    _ui.rbDisplayBatteryOnTrayIconAlways->setChecked(batteryOnTrayIconAlways);
+
+    auto [batteryOnTaskbarDisable, batteryOnTaskbarText, batteryOnTaskbarIcon] = std::make_tuple(
+        fields.battery_on_taskbar == TaskbarStatusBehavior::Disable,
+        fields.battery_on_taskbar == TaskbarStatusBehavior::Text,
+        fields.battery_on_taskbar == TaskbarStatusBehavior::Icon);
+
+    _ui.rbDisplayBatteryOnTaskbarDisable->setChecked(batteryOnTaskbarDisable);
+    _ui.rbDisplayBatteryOnTaskbarText->setChecked(batteryOnTaskbarText);
+    _ui.rbDisplayBatteryOnTaskbarIcon->setChecked(batteryOnTaskbarIcon);
+
+    _ui.pbUnbind->setDisabled(fields.device_address == 0);
+
+    UpdateQuickConnectDevices(fields);
+
+    _trigger = true;
+}
+
+void SettingsWindow::UpdateQuickConnectDevices(const Fields &fields)
+{
+    const auto previousTrigger = _trigger;
+    _trigger = false;
+
+    const auto &selectedId = fields.tray_quick_connect_device_id;
+
+    _ui.cbTrayQuickConnectDevice->clear();
+    for (const auto &device : _quickConnect.Devices()) {
+        _ui.cbTrayQuickConnectDevice->addItem(device.name, device.id);
+    }
+
+    auto selectedIndex = _ui.cbTrayQuickConnectDevice->findData(selectedId);
+    if (selectedIndex == -1 && !selectedId.isEmpty()) {
+        // The saved device is paired but not reporting an audio endpoint right now - switched off,
+        // out of range, or the enumeration has not finished. Show it as chosen but unavailable
+        // rather than an empty box that reads like nothing was ever configured.
+        _ui.cbTrayQuickConnectDevice->addItem(tr("Saved device (not available)"), selectedId);
+        selectedIndex = _ui.cbTrayQuickConnectDevice->count() - 1;
+    }
+    _ui.cbTrayQuickConnectDevice->setCurrentIndex(selectedIndex);
+
+    _ui.cbTrayQuickConnectEnabled->setChecked(fields.tray_quick_connect_enabled);
+    // Always leave the checkbox usable: a transient empty enumeration must never trap the user in
+    // a state they cannot turn off.
+    _ui.cbTrayQuickConnectEnabled->setEnabled(true);
+    _ui.cbTrayQuickConnectDevice->setEnabled(_ui.cbTrayQuickConnectDevice->count() > 0);
+
+    _trigger = previousTrigger;
+}
+
+void SettingsWindow::UpdateAdvOverride()
+{
+    auto advsStr = _ui.teAdvOverride->toPlainText();
+    auto vAdvsStr = advsStr.split('\n', QString::SkipEmptyParts);
+
+    std::vector<std::vector<uint8_t>> advs;
+
+    for (const auto &advStr : vAdvsStr) {
+
+        auto advBytesStr = advStr.split(' ', QString::SkipEmptyParts);
+
+        std::vector<uint8_t> bytes;
+        for (const auto advByteStr : advBytesStr) {
+            bool success{false};
+            auto byte = advByteStr.toUInt(&success, 16);
+            APB_ASSERT(success);
+            bytes.emplace_back(byte);
+        }
+
+        advs.emplace_back(std::move(bytes));
+    }
+
+    Core::Debug::DebugConfig::GetInstance().UpdateAdvOverride(
+        _ui.cbAdvOverride->isChecked(), std::move(advs));
+}
+
+void SettingsWindow::showEvent(QShowEvent *event)
+{
+    Update(GetCurrent(), false);
+
+    // Enumerating paired Bluetooth devices and every audio endpoint is not free, so it happens
+    // when the dialog is opened rather than on every application start.
+    _quickConnect.RefreshDevices();
+}
+
+void SettingsWindow::On_cbAutoRun_toggled(bool checked)
+{
+    ModifiableAccess()->auto_run = checked;
+}
+
+void SettingsWindow::On_cbTrayQuickConnectEnabled_toggled(bool checked)
+{
+    ModifiableAccess()->tray_quick_connect_enabled = checked;
+}
+
+void SettingsWindow::On_cbTrayQuickConnectDevice_currentIndexChanged(int index)
+{
+    const auto id = _ui.cbTrayQuickConnectDevice->itemData(index).toString();
+    ModifiableAccess()->tray_quick_connect_device_id = id;
+}
+
+void SettingsWindow::On_pbUnbind_clicked()
+{
+    _ui.pbUnbind->setDisabled(true);
+    ModifiableAccess()->device_address = 0;
+}
+
+void SettingsWindow::On_cbDisplayBatteryOnTrayIcon_toggled(TrayIconBatteryBehavior behavior)
+{
+    ModifiableAccess()->tray_icon_battery = behavior;
+}
+
+void SettingsWindow::On_cbDisplayBatteryOnTaskbar_toggled(TaskbarStatusBehavior behavior)
+{
+    ModifiableAccess()->battery_on_taskbar = behavior;
+}
+
+void SettingsWindow::On_cbAutoEarDetection_toggled(bool checked)
+{
+    ModifiableAccess()->automatic_ear_detection = checked;
+}
+
+void SettingsWindow::On_hsMaxReceivingRange_valueChanged(int value)
+{
+    ModifiableAccess()->rssi_min = -value;
+}
+
+void SettingsWindow::On_pbOpenLogsDirectory_clicked()
+{
+    Utils::File::OpenFileLocation(Logger::GetLogFilePath());
+}
+
+void SettingsWindow::On_cbAdvOverride_toggled(bool checked)
+{
+    UpdateAdvOverride();
+}
+
+void SettingsWindow::On_teAdvOverride_textChanged()
+{
+    UpdateAdvOverride();
+}
+
+} // namespace Gui
+
+#include "SettingsWindow.moc"

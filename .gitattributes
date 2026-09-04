@@ -1,0 +1,26 @@
+# Normalise line endings on commit; check out with the platform's native endings.
+* text=auto
+
+# Windows tooling requires CRLF in these.
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+*.ps1        text eol=crlf
+*.sln        text eol=crlf
+*.rc         text eol=crlf
+
+# Always LF, regardless of platform.
+*.sh         text eol=lf
+
+# Binary assets: never diff, never convert.
+*.avi        binary
+*.mp3        binary
+*.ico        binary
+*.png        binary
+*.jpg        binary
+*.pfx        binary
+
+# Qt Designer forms are XML; treat them as text but do not try to merge them.
+*.ui         text merge=binary
+
+# Keep documentation out of the repository's language statistics.
+Docs/**      linguist-documentation

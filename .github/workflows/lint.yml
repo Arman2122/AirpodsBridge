@@ -1,0 +1,130 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install clang-format
+        # Pinned so a new upstream release cannot fail the build on a formatting rule that
+        # changed. 18 is the minimum: earlier versions ignore .clang-format-ignore.
+        run: pip install clang-format==19.1.5
+
+      - name: Check formatting
+        run: |
+          find Source Tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 \
+            | xargs -0 clang-format --dry-run --Werror
+
+  cmake:
+    name: CMake presets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate CMakePresets.json
+        # Parses the preset file and resolves inheritance without configuring, which
+        # catches a malformed or misspelled preset before anyone builds with it.
+        run: cmake --list-presets
+
+  metadata:
+    name: Repository metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Version is consistent
+        run: |
+          cmake_version=$(sed -n 's/^ *VERSION \([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' \
+            CMakeLists.txt | head -1)
+          vcpkg_version=$(python3 -c \
+            "import json;print(json.load(open('vcpkg.json'))['version-string'])")
+          echo "CMakeLists.txt: $cmake_version, vcpkg.json: $vcpkg_version"
+          test -n "$cmake_version"
+          test "$cmake_version" = "$vcpkg_version"
+
+      - name: Every source file carries a licence identifier
+        run: |
+          missing=$(grep -RL 'SPDX-License-Identifier' \
+            --include='*.cpp' --include='*.h' --include='*.py' \
+            --include='*.cmake' --include='CMakeLists.txt' --include='*.h.in' \
+            Source Tests Tools CMake CMakeLists.txt || true)
+          if [ -n "$missing" ]; then
+            echo "Missing SPDX-License-Identifier:"
+            echo "$missing"
+            exit 1
+          fi
+
+      - name: Module layering
+        # Dependencies point one way: Support <- Domain <- {Core, Presentation} <- Gui <- App.
+        # CMake enforces the link graph, but a header-only crossing links fine, so the
+        # include direction has to be checked by grep. Quotes are matched with . to keep
+        # the pattern free of shell escaping.
+        run: |
+          status=0
+          check() {
+            module=$1; shift
+            for forbidden in $@; do
+              hits=$(grep -rn "include .Source/$forbidden/" "Source/$module/" || true)
+              if [ -n "$hits" ]; then
+                echo "$module must not include $forbidden:"
+                echo "$hits"
+                status=1
+              fi
+            done
+          }
+          check Support Domain Core Presentation Gui App
+          check Domain Presentation Gui App
+          check Presentation Core Gui App
+          check Core Gui App
+          # Domain -> Core is a single documented exception; see Docs/Architecture.md.
+          hits=$(grep -rn "include .Source/Core/" Source/Domain/ |
+            grep -v "AirPodsAdvertisement.h:.*Core/Bluetooth.h" || true)
+          if [ -n "$hits" ]; then
+            echo "Domain must not include Core (beyond the documented exception):"
+            echo "$hits"
+            status=1
+          fi
+          exit $status
+      - name: Relative links resolve
+        # Catches a document referencing a file that was renamed or never existed, which is
+        # how a README ends up pointing at a missing NOTICE.
+        run: |
+          status=0
+          while IFS= read -r doc; do
+            while IFS= read -r link; do
+              target=${link%%#*}
+              [ -z "$target" ] && continue
+              case $target in /*) resolved=".$target" ;; *) resolved="$(dirname "$doc")/$target" ;; esac
+              if [ ! -e "$resolved" ]; then
+                echo "$doc -> $target"
+                status=1
+              fi
+            done <<< "$(grep -o '](\([^)]*\))' "$doc" \
+              | sed 's/^](//; s/)$//' \
+              | grep -v '^[a-z][a-z0-9+.-]*:' || true)"
+          done <<< "$(find . -name '*.md' -not -path './Build/*' -not -path './.git/*')"
+          exit $status
