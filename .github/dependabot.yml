@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # GitHub Actions is the only ecosystem Dependabot can service here. The C++ dependencies
+  # come from vcpkg and from FetchContent pins in CMakeLists.txt, neither of which
+  # Dependabot supports; those are reviewed by hand when the vcpkg baseline is refreshed.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      actions:
+        patterns:
+          - "*"

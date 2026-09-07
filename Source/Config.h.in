@@ -1,0 +1,48 @@
+// SPDX-FileCopyrightText: 2026 Arman2122
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+#pragma once
+
+#include <cstdint>
+
+namespace Config {
+
+#define CONFIG_VERSION_STRING           "@AirpodsBridge_VERSION_MAJOR@.@AirpodsBridge_VERSION_MINOR@.@AirpodsBridge_VERSION_PATCH@"
+#define CONFIG_WINRC_VERSION_NUMBERS    @AirpodsBridge_VERSION_MAJOR@, @AirpodsBridge_VERSION_MINOR@, @AirpodsBridge_VERSION_PATCH@, 0
+#define CONFIG_WINRC_VERSION_STRING     CONFIG_VERSION_STRING ".0"
+#define CONFIG_PROGRAM_NAME             "@PROJECT_NAME@"
+#define CONFIG_DESCRIPTION              "@PROJECT_DESCRIPTION@"
+#define CONFIG_COPYRIGHT                "Copyright © 2026 Arman2122"
+#define CONFIG_CPACK_SYSTEM_NAME        "@CPACK_SYSTEM_NAME@"
+#define CONFIG_GITHUB_OWNER             "@APB_GITHUB_OWNER@"
+#define CONFIG_GITHUB_REPOSITORY        "@APB_GITHUB_REPOSITORY@"
+#define CONFIG_URL_REPO                 "https://github.com/" CONFIG_GITHUB_OWNER "/" CONFIG_GITHUB_REPOSITORY
+#define CONFIG_API_REPO                 "https://api.github.com/repos/" CONFIG_GITHUB_OWNER "/" CONFIG_GITHUB_REPOSITORY
+#define CONFIG_URL_ISSUES               CONFIG_URL_REPO "/issues"
+#define CONFIG_URL_RELEASES             CONFIG_URL_REPO "/releases"
+#define CONFIG_URL_LICENSE              CONFIG_URL_REPO "/blob/main/LICENSE"
+#define CONFIG_RELEASE_TAG_PREFIX       "@APB_RELEASE_TAG_PREFIX@"
+#define CONFIG_URL_CURRENT_RELEASE      CONFIG_URL_RELEASES "/tag/" CONFIG_RELEASE_TAG_PREFIX CONFIG_VERSION_STRING
+
+constexpr inline auto ProgramName = CONFIG_PROGRAM_NAME;
+constexpr inline auto UrlRepository = CONFIG_URL_REPO;
+constexpr inline auto ApiRepository = CONFIG_API_REPO;
+constexpr inline auto UrlIssues = CONFIG_URL_ISSUES;
+constexpr inline auto UrlReleases = CONFIG_URL_RELEASES;
+constexpr inline auto UrlLicense = CONFIG_URL_LICENSE;
+constexpr inline auto UrlCurrentRelease = CONFIG_URL_CURRENT_RELEASE;
+constexpr inline auto License = "PolyForm Noncommercial 1.0.0";
+constexpr inline auto Copyright = CONFIG_COPYRIGHT;
+constexpr inline auto Description = CONFIG_DESCRIPTION;
+constexpr inline auto QrcIconSvg = ":/Resource/Image/Icon.svg";
+
+namespace Version {
+
+constexpr inline uint32_t Major = @AirpodsBridge_VERSION_MAJOR@;
+constexpr inline uint32_t Minor = @AirpodsBridge_VERSION_MINOR@;
+constexpr inline uint32_t Patch = @AirpodsBridge_VERSION_PATCH@;
+
+constexpr inline auto String = CONFIG_VERSION_STRING;
+
+} // namespace Version
+} // namespace Config

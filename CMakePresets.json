@@ -1,0 +1,98 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "Win32",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT_DIR}"
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "windows-base",
+      "displayName": "Developer build",
+      "description": "Tests enabled and a console attached, so log output is visible.",
+      "cacheVariables": {
+        "APB_BUILD_TESTS": "ON",
+        "APB_ENABLE_CONSOLE": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "windows-base",
+      "displayName": "Release build",
+      "description": "What a tagged build produces: tests plus the NSIS installer.",
+      "cacheVariables": {
+        "APB_BUILD_TESTS": "ON",
+        "APB_GENERATE_INSTALLER": "ON"
+      }
+    },
+    {
+      "name": "vs2019",
+      "inherits": "dev",
+      "displayName": "Developer build (Visual Studio 2019)",
+      "generator": "Visual Studio 16 2019"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "vs2019",
+      "configurePreset": "vs2019",
+      "configuration": "RelWithDebInfo"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "configuration": "RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "configuration": "RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vs2019",
+      "configurePreset": "vs2019",
+      "configuration": "RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

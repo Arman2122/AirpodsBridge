@@ -1,0 +1,253 @@
+; SPDX-FileCopyrightText: 2026 Arman2122
+; SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+;
+; The AirpodsBridge installer.
+;
+; CPack fills in the @VARIABLES@ and hands the result to makensis. This replaces CMake's
+; stock template, which insists on an administrator install, a Start Menu folder page and
+; a PATH page, none of which suit a tray application.
+;
+; What it does instead:
+;
+;   - Installs for the current user, under %LOCALAPPDATA%\Programs. No administrator
+;     prompt, and the application's own updater can run this installer unattended.
+;   - Welcome, licence, folder, progress, finish. The finish page offers to launch the
+;     application and to add a desktop shortcut; neither happens unasked.
+;   - Closes a running copy before touching its files, on install and on uninstall. The
+;     updater launches this from inside the running application, so that is the normal
+;     path rather than an edge case.
+;   - Replaces a previous per-user copy in place, running its uninstaller silently first
+;     so that files this version no longer ships do not linger. A copy installed for all
+;     users by the 1.0.0 installer is detected and its (elevated) uninstaller offered.
+;   - Registers with Apps & features properly: icon, publisher, version, size, links.
+;
+; The application's settings live under HKCU\Software\AirpodsBridge\AirpodsBridge and
+; are deliberately left alone by the uninstaller: they are the user's, and a reinstall
+; should find them.
+
+Unicode true
+
+;--------------------------------
+; From CPack
+
+!define VERSION "@CPACK_PACKAGE_VERSION@"
+!define INST_DIR "@CPACK_TEMPORARY_DIRECTORY@"
+!define APP_NAME "@CPACK_NSIS_PACKAGE_NAME@"
+!define APP_EXE "@CPACK_NSIS_INSTALLED_ICON_NAME@"
+!define UNINSTALLER "@CPACK_NSIS_UNINSTALL_NAME@.exe"
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@"
+!define INSTALLER_KEY "Software\@CPACK_PACKAGE_VENDOR@\Installer"
+
+@CPACK_NSIS_DEFINES@
+
+;--------------------------------
+; General
+
+Name "${APP_NAME}"
+OutFile "@CPACK_TOPLEVEL_DIRECTORY@/@CPACK_OUTPUT_FILE_NAME@"
+InstallDir "@CPACK_NSIS_INSTALL_ROOT@\@CPACK_PACKAGE_INSTALL_DIRECTORY@"
+InstallDirRegKey HKCU "${INSTALLER_KEY}" ""
+RequestExecutionLevel user
+SetCompressor @CPACK_NSIS_COMPRESSOR@
+ShowInstDetails nevershow
+ShowUninstDetails nevershow
+
+@CPACK_NSIS_MANIFEST_DPI_AWARE_CODE@
+@CPACK_NSIS_BRANDING_TEXT_CODE@
+@CPACK_NSIS_CRC_CHECK_CODE@
+
+VIProductVersion "${VERSION}.0"
+VIAddVersionKey "ProductName" "${APP_NAME}"
+VIAddVersionKey "ProductVersion" "${VERSION}"
+VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "FileDescription" "${APP_NAME} installer"
+VIAddVersionKey "CompanyName" "@CPACK_PACKAGE_VENDOR@"
+VIAddVersionKey "LegalCopyright" "@CPACK_NSIS_CONTACT@"
+
+;--------------------------------
+; Look
+
+!include "MUI2.nsh"
+!include "FileFunc.nsh"
+!include "LogicLib.nsh"
+
+@CPACK_NSIS_INSTALLER_MUI_ICON_CODE@
+
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "@CPACK_NSIS_APB_HEADER_BMP@"
+!define MUI_HEADERIMAGE_UNBITMAP "@CPACK_NSIS_APB_HEADER_BMP@"
+!define MUI_HEADERIMAGE_RIGHT
+!define MUI_WELCOMEFINISHPAGE_BITMAP "@CPACK_NSIS_APB_SIDEBAR_BMP@"
+!define MUI_UNWELCOMEFINISHPAGE_BITMAP "@CPACK_NSIS_APB_SIDEBAR_BMP@"
+!define MUI_ABORTWARNING
+!define MUI_UNABORTWARNING
+
+;--------------------------------
+; Pages
+
+!define MUI_WELCOMEPAGE_TITLE "Welcome to ${APP_NAME}"
+!define MUI_WELCOMEPAGE_TEXT "AirPods battery, ear detection and quick connect, in the Windows notification area.$\r$\n$\r$\nThis installs ${APP_NAME} ${VERSION} for your account only. It needs no administrator rights, and updates install the same way.$\r$\n$\r$\n$_CLICK"
+!insertmacro MUI_PAGE_WELCOME
+
+@CPACK_NSIS_LICENSE_PAGE@
+
+!define MUI_DIRECTORYPAGE_TEXT_TOP "${APP_NAME} will be installed in the folder below. Choose another with Browse."
+!insertmacro MUI_PAGE_DIRECTORY
+
+!insertmacro MUI_PAGE_INSTFILES
+
+!define MUI_FINISHPAGE_TITLE "${APP_NAME} is installed"
+!define MUI_FINISHPAGE_TEXT "It runs in the notification area: click the icon to see the battery, right-click for settings.$\r$\n$\r$\nClick Finish to close this wizard."
+!define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
+; The flag makes the application announce itself from the tray once it is up.
+!define MUI_FINISHPAGE_RUN_PARAMETERS "--after-install"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch ${APP_NAME}"
+!define MUI_FINISHPAGE_SHOWREADME ""
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "Add a shortcut to the desktop"
+!define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
+!define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateDesktopShortcut
+!insertmacro MUI_PAGE_FINISH
+
+!insertmacro MUI_UNPAGE_WELCOME
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_UNPAGE_FINISH
+
+!insertmacro MUI_LANGUAGE "English"
+
+;--------------------------------
+; Helpers
+
+; The application keeps its executable open for as long as it runs, and nothing can be
+; replaced underneath it. `nsExec` runs the command without a console window.
+!macro CloseRunningInstance
+  nsExec::ExecToStack 'taskkill /F /IM "${APP_EXE}"'
+  Pop $0
+  Pop $1
+  Sleep 400
+!macroend
+
+Function CreateDesktopShortcut
+  SetShellVarContext current
+  CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+FunctionEnd
+
+; Runs the uninstaller found at $0 (unquoted path), installed in $1, and waits for it.
+; `_?=` keeps the uninstaller from copying itself to a temporary file, which is what makes
+; ExecWait actually wait.
+Function RunPreviousUninstaller
+  ClearErrors
+  ExecWait '"$0" /S _?=$1'
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "The previous version could not be removed. Uninstall it from Apps & features, then run this installer again."
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Function .onInit
+  SetShellVarContext current
+
+  ; A per-user copy is replaced in place: its uninstaller runs silently first.
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "UninstallString"
+  ${If} $0 != ""
+    ReadRegStr $1 HKCU "${INSTALLER_KEY}" ""
+    ${If} $1 != ""
+      StrCpy $0 "$1\${UNINSTALLER}"
+      IfFileExists "$0" 0 +2
+        Call RunPreviousUninstaller
+    ${EndIf}
+  ${EndIf}
+
+  ; A copy installed for all users predates this installer and lives in Program Files.
+  ; Two copies would fight over the tray, so it has to go first; its uninstaller asks
+  ; Windows for permission on its own.
+  StrCpy $2 0
+  ${Do}
+    EnumRegKey $3 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall" $2
+    ${If} $3 == ""
+      ${ExitDo}
+    ${EndIf}
+    StrCpy $4 $3 13
+    ${If} $4 == "AirpodsBridge"
+      ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$3" "UninstallString"
+      ${If} $0 != ""
+        MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "A copy of ${APP_NAME} installed for all users was found.$\r$\n$\r$\nIt will be removed first, which needs administrator permission. This version installs for your account only." /SD IDOK IDOK +2
+          Abort
+        ; Strip the quotes the old installer wrote, then run it in place.
+        StrCpy $1 $0 1
+        ${If} $1 == '"'
+          StrCpy $0 $0 "" 1
+          StrCpy $0 $0 -1
+        ${EndIf}
+        ${GetParent} $0 $1
+        Call RunPreviousUninstaller
+      ${EndIf}
+      ${ExitDo}
+    ${EndIf}
+    IntOp $2 $2 + 1
+  ${Loop}
+FunctionEnd
+
+Function un.onInit
+  SetShellVarContext current
+FunctionEnd
+
+;--------------------------------
+; Install
+
+Section "-Install"
+  SetShellVarContext current
+  !insertmacro CloseRunningInstance
+
+  SetOutPath "$INSTDIR"
+  @CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS@
+  @CPACK_NSIS_FULL_INSTALL@
+
+  WriteRegStr HKCU "${INSTALLER_KEY}" "" "$INSTDIR"
+  WriteUninstaller "$INSTDIR\${UNINSTALLER}"
+
+  CreateShortCut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  @CPACK_NSIS_CREATE_ICONS_EXTRA@
+
+  ; Apps & features
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "@CPACK_NSIS_DISPLAY_NAME@"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "@CPACK_PACKAGE_VENDOR@"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" "$\"$INSTDIR\${UNINSTALLER}$\""
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "QuietUninstallString" "$\"$INSTDIR\${UNINSTALLER}$\" /S"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "URLInfoAbout" "@CPACK_NSIS_URL_INFO_ABOUT@"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "HelpLink" "@CPACK_NSIS_HELP_LINK@"
+  WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
+
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  IntFmt $0 "0x%08X" $0
+  WriteRegDWORD HKCU "${UNINSTALL_KEY}" "EstimatedSize" "$0"
+
+  @CPACK_NSIS_EXTRA_INSTALL_COMMANDS@
+SectionEnd
+
+;--------------------------------
+; Uninstall
+
+Section "Uninstall"
+  SetShellVarContext current
+  !insertmacro CloseRunningInstance
+
+  @CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS@
+
+@CPACK_NSIS_DELETE_FILES@
+@CPACK_NSIS_DELETE_DIRECTORIES@
+
+  Delete "$INSTDIR\${UNINSTALLER}"
+  RMDir "$INSTDIR"
+
+  Delete "$SMPROGRAMS\${APP_NAME}.lnk"
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+  @CPACK_NSIS_DELETE_ICONS_EXTRA@
+
+  DeleteRegKey HKCU "${UNINSTALL_KEY}"
+  DeleteRegKey HKCU "${INSTALLER_KEY}"
+SectionEnd

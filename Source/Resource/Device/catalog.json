@@ -1,0 +1,651 @@
+{
+  "generator": "Tools/apple_device_assets.py",
+  "asset": "com.apple.MobileAsset.SharingDeviceAssets",
+  "build": "10M11512",
+  "products": {
+    "AirPods1,1": {
+      "name": "AirPods 1",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPods1_1/CL_0/still.png",
+          "size": [
+            421,
+            212
+          ],
+          "loop": "AirPods1_1/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.227,
+            0.79
+          ]
+        }
+      }
+    },
+    "AirPods1,2": {
+      "name": "AirPods 2",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "AirPods1_2/CL_0/still.png",
+          "size": [
+            421,
+            212
+          ],
+          "loop": "AirPods1_2/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.227,
+            0.79
+          ]
+        }
+      }
+    },
+    "AirPods1,3": {
+      "name": "AirPods 3",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "AirPods1_3/CL_0/still.png",
+          "size": [
+            480,
+            197
+          ],
+          "loop": "AirPods1_3/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.18,
+            0.761
+          ]
+        }
+      }
+    },
+    "AirPods1,4": {
+      "name": "AirPods 4",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "AirPods1_4/CL_0/still.png",
+          "size": [
+            480,
+            209
+          ],
+          "loop": "AirPods1_4/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.204,
+            0.765
+          ]
+        }
+      }
+    },
+    "AirPods1,5": {
+      "name": "AirPods 4 (ANC)",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "AirPods1_5/CL_0/still.png",
+          "size": [
+            480,
+            209
+          ],
+          "loop": "AirPods1_5/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.204,
+            0.765
+          ]
+        }
+      }
+    },
+    "AirPodsPro1,1": {
+      "name": "AirPods Pro",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsPro1_1/CL_0/still.png",
+          "size": [
+            480,
+            184
+          ],
+          "loop": "AirPodsPro1_1/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.181,
+            0.749
+          ]
+        }
+      }
+    },
+    "AirPodsPro1,2": {
+      "name": "AirPods Pro 2, including USB-C",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsPro1_2/CL_0/still.png",
+          "size": [
+            480,
+            182
+          ],
+          "loop": "AirPodsPro1_2/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.181,
+            0.751
+          ]
+        }
+      }
+    },
+    "AirPodsPro1,3": {
+      "name": "AirPods Pro 3",
+      "default": 0,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsPro1_3/CL_0/still.png",
+          "size": [
+            480,
+            190
+          ],
+          "loop": "AirPodsPro1_3/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.169,
+            0.745
+          ]
+        }
+      }
+    },
+    "AirPodsMax1,1": {
+      "name": "AirPods Max",
+      "default": 15,
+      "mastered": "11512",
+      "variants": {
+        "2": {
+          "name": "Red",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_1/CL_2/still.png",
+          "size": [
+            190,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        },
+        "3": {
+          "name": "Blue",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_1/CL_3/still.png",
+          "size": [
+            190,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        },
+        "15": {
+          "name": "Dark Grey",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_1/CL_15/still.png",
+          "size": [
+            190,
+            212
+          ],
+          "loop": "AirPodsMax1_1/CL_15/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.497
+          ]
+        },
+        "16": {
+          "name": "Silver",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_1/CL_16/still.png",
+          "size": [
+            190,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        },
+        "17": {
+          "name": "Green",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_1/CL_17/still.png",
+          "size": [
+            190,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        }
+      }
+    },
+    "AirPodsMax1,2": {
+      "name": "AirPods Max (USB-C)",
+      "default": 18,
+      "mastered": "11512",
+      "variants": {
+        "18": {
+          "name": "Black",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "straight",
+          "still": "AirPodsMax1_2/CL_18/still.png",
+          "size": [
+            188,
+            212
+          ],
+          "loop": "AirPodsMax1_2/CL_18/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.497
+          ]
+        },
+        "19": {
+          "name": "Silver",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_2/CL_19/still.png",
+          "size": [
+            189,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        },
+        "20": {
+          "name": "Blue",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_2/CL_20/still.png",
+          "size": [
+            189,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        },
+        "21": {
+          "name": "Orange",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_2/CL_21/still.png",
+          "size": [
+            188,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        },
+        "22": {
+          "name": "Purple",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "AirPodsMax1_2/CL_22/still.png",
+          "size": [
+            189,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        }
+      }
+    },
+    "BeatsFitPro1,1": {
+      "name": "Beats Fit Pro",
+      "default": 1,
+      "mastered": "11512",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_0/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.711
+          ]
+        },
+        "1": {
+          "name": "Black",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_1/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "loop": "BeatsFitPro1_1/CL_1/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.209,
+            0.711
+          ]
+        },
+        "2": {
+          "name": "Stone Purple",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_2/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.711
+          ]
+        },
+        "3": {
+          "name": "Sage Gray",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_3/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.711
+          ]
+        },
+        "4": {
+          "name": "Sunset",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsFitPro1_1/CL_4/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.713
+          ]
+        },
+        "5": {
+          "name": "Lemon Lime",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsFitPro1_1/CL_5/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.713
+          ]
+        },
+        "6": {
+          "name": "Eventide",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsFitPro1_1/CL_6/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.713
+          ]
+        },
+        "7": {
+          "name": "Mica",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsFitPro1_1/CL_7/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.713
+          ]
+        },
+        "8": {
+          "name": "Ochre",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsFitPro1_1/CL_8/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.713
+          ]
+        },
+        "9": {
+          "name": "Umber",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsFitPro1_1/CL_9/still.png",
+          "size": [
+            480,
+            118
+          ],
+          "anchors": [
+            0.209,
+            0.713
+          ]
+        },
+        "10": {
+          "name": "Black",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_10/still.png",
+          "size": [
+            480,
+            117
+          ],
+          "anchors": [
+            0.21,
+            0.723
+          ]
+        },
+        "11": {
+          "name": "Grey",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_11/still.png",
+          "size": [
+            480,
+            117
+          ],
+          "anchors": [
+            0.21,
+            0.723
+          ]
+        },
+        "12": {
+          "name": "Pink",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_12/still.png",
+          "size": [
+            480,
+            117
+          ],
+          "anchors": [
+            0.21,
+            0.723
+          ]
+        },
+        "13": {
+          "name": "Orange",
+          "mastered": "11512",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "BeatsFitPro1_1/CL_13/still.png",
+          "size": [
+            480,
+            117
+          ],
+          "anchors": [
+            0.21,
+            0.723
+          ]
+        }
+      }
+    },
+    "PowerBeats3,1": {
+      "name": "Powerbeats 3",
+      "default": 1,
+      "mastered": "11512",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "straight",
+          "still": "PowerBeats3_1/CL_1/still.png",
+          "size": [
+            214,
+            212
+          ],
+          "anchors": [
+            0.409
+          ]
+        }
+      }
+    },
+    "BeatsX1,1": {
+      "name": "BeatsX",
+      "default": 1,
+      "mastered": "11512",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "straight",
+          "still": "BeatsX1_1/CL_1/still.png",
+          "size": [
+            233,
+            212
+          ],
+          "anchors": [
+            0.498
+          ]
+        }
+      }
+    },
+    "BeatsSolo3,1": {
+      "name": "Beats Solo3",
+      "default": 1,
+      "mastered": "11512",
+      "variants": {
+        "1": {
+          "name": "Gloss Black",
+          "mastered": "11512",
+          "from": "ProxCard_loop.mov",
+          "alpha": "straight",
+          "still": "BeatsSolo3_1/CL_1/still.png",
+          "size": [
+            192,
+            212
+          ],
+          "anchors": [
+            0.508
+          ]
+        }
+      }
+    }
+  },
+  "loopWidth": 480
+}

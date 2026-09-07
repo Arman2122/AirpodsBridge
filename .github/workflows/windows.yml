@@ -1,0 +1,214 @@
+name: Windows
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Superseded pull-request runs are cancelled, but a push to main or a release tag always
+  # runs to completion -- cancelling one of those would skip publishing a release.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BUILD_TYPE: RelWithDebInfo
+  QT_VERSION: 5.15.2
+
+jobs:
+  build:
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check release version
+        id: version
+        run: |
+          $cmakeContents = Get-Content CMakeLists.txt -Raw
+          $match = [regex]::Match(
+            $cmakeContents,
+            '(?s)project\s*\(\s*AirpodsBridge\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)'
+          )
+          if (-not $match.Success) {
+            throw 'Unable to read the project version from CMakeLists.txt.'
+          }
+
+          $version = $match.Groups[1].Value
+          $manifestVersion = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'version-string'
+          if ($version -ne $manifestVersion) {
+            throw "CMake version $version does not match vcpkg version $manifestVersion."
+          }
+
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match v$version."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win32_msvc2019
+          cache: true
+
+      - name: Clone and bootstrap vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git Build/vcpkg
+          & Build/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Configure
+        run: |
+          cmake -S . -B Build/Release `
+            -G 'Visual Studio 17 2022' `
+            -A Win32 `
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/Build/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR `
+            -DAPB_BUILD_TESTS=ON `
+            -DAPB_GENERATE_INSTALLER=ON `
+            -DAPB_GITHUB_OWNER=${{ github.repository_owner }} `
+            -DAPB_GITHUB_REPOSITORY=${{ github.event.repository.name }} `
+            -DAPB_BUILD_GIT_HASH=${{ github.sha }}
+
+      - name: Build
+        run: cmake --build Build/Release --config $env:BUILD_TYPE --parallel 2
+
+      - name: Test
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR/bin;$env:PATH"
+          ctest --test-dir Build/Release -C $env:BUILD_TYPE --output-on-failure
+
+      - name: Package release assets
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $installer = Get-ChildItem `
+            Build/Release/Installer/AirpodsBridge-*-win32.exe |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw 'The NSIS installer was not generated.'
+          }
+
+          $portableSource =
+            "Build/Release/Installer/_CPack_Packages/win32/NSIS/AirpodsBridge-$env:VERSION-win32"
+          if (-not (Test-Path -LiteralPath $portableSource)) {
+            throw "Portable package directory not found: $portableSource"
+          }
+
+          New-Item -ItemType Directory -Path dist | Out-Null
+          $installerDestination = "dist/AirpodsBridge-$env:VERSION-win32.exe"
+          $portableDestination = "dist/AirpodsBridge-$env:VERSION-win32-portable.zip"
+          Copy-Item -LiteralPath $installer.FullName -Destination $installerDestination
+          Compress-Archive -Path "$portableSource/*" -DestinationPath $portableDestination
+
+      - name: Sign installer when a certificate is configured
+        if: github.ref_type == 'tag'
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_PASSWORD)
+          if (-not $hasCertificate -and -not $hasPassword) {
+            Write-Warning 'Code-signing secrets are not configured; publishing an unsigned installer.'
+            exit 0
+          }
+          if (-not $hasCertificate -or -not $hasPassword) {
+            throw 'Both Windows code-signing secrets must be configured together.'
+          }
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'AirpodsBridge-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes(
+              $certificatePath,
+              [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
+            )
+            $signTool = Get-ChildItem `
+              "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x86/signtool.exe" |
+              Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+              Select-Object -First 1
+            if (-not $signTool) {
+              throw 'signtool.exe was not found on the runner.'
+            }
+
+            $installer = Get-ChildItem dist/AirpodsBridge-*-win32.exe | Select-Object -First 1
+            & $signTool.FullName sign `
+              /fd SHA256 `
+              /td SHA256 `
+              /tr http://timestamp.digicert.com `
+              /f $certificatePath `
+              /p $env:SIGNING_CERTIFICATE_PASSWORD `
+              $installer.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool sign failed with exit code $LASTEXITCODE."
+            }
+
+            & $signTool.FullName verify /pa /v $installer.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool verify failed with exit code $LASTEXITCODE."
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Generate release checksums
+        run: |
+          Get-ChildItem dist -File |
+            Where-Object Extension -In '.exe', '.zip' |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            } | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: AirpodsBridge-${{ steps.version.outputs.version }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: AirpodsBridge-${{ needs.build.outputs.version }}-${{ github.sha }}
+          path: dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}" dist/*
+          --repo "${{ github.repository }}"
+          --verify-tag
+          --generate-notes
+          --title "AirpodsBridge ${{ github.ref_name }}"

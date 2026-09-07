@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest an improvement
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening this, please check the project's scope in
+        [CONTRIBUTING.md](https://github.com/Arman2122/AirpodsBridge/blob/main/CONTRIBUTING.md#scope).
+
+        Two things are settled and will not change: AirpodsBridge is **Windows only** and
+        **English only**. Requests to add translations will be closed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation you run into, not the solution you have in mind.
+      placeholder: I can never tell which bud is running low before it cuts out.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Including any existing setting or workaround that nearly does the job.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Mockups, screenshots from other tools, or links to relevant discussion.

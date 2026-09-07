@@ -1,0 +1,13 @@
+Device artwork notice
+
+The images and animations under this directory are Apple Inc.'s product artwork: the
+renders and loops Apple publishes for its proximity-pairing card in the
+com.apple.MobileAsset.SharingDeviceAssets asset catalogue, fetched from Apple's servers
+and converted for this application by Tools/apple_device_assets.py.
+
+They are the property of Apple Inc. and are not covered by the licence that applies
+to the rest of this repository. They are included so that the application can show a
+device the way Apple draws it, and for no other purpose.
+
+AirPods, AirPods Pro, AirPods Max and Beats are trademarks of Apple Inc. AirpodsBridge is
+not affiliated with, authorised by, or endorsed by Apple Inc.

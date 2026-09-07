@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/Resource">
+        <file>Image/Icon.svg</file>
+        <file>Font/Inter-Regular.ttf</file>
+        <file>Font/Inter-Medium.ttf</file>
+        <file>Font/Inter-SemiBold.ttf</file>
+        <file>Font/InterDisplay-SemiBold.ttf</file>
+    </qresource>
+</RCC>
