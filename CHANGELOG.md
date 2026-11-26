@@ -218,6 +218,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed random silent audio after switching output to AirPods, silent `keepAlive` drops,
+  and wear-automation routing races (`Source/Core/AudioControl.h`,
+  `Source/Core/AudioControl_win.cpp`, `Source/Core/AutomationEngine.cpp`,
+  `Source/App/Application.cpp`):
+  - Made `SetDefaultAudioEndpoint` per-role idempotent across `eConsole`, `eMultimedia`, and
+    `eCommunications` with live endpoint-state verification and transient retry, eliminating
+    3× rapid-fire device-change bursts on connect that wedged `BthA2dp.sys` and playback apps.
+  - Added a 160 ms silent shared-mode WASAPI A2DP wake pulse (`AUDCLNT_BUFFERFLAGS_SILENT`)
+    after output switches and Hands-Free call releases, preferred-mic enforcement before
+    playback routing, a 450 ms post-switch role/mic verification pass, and a Bluetooth
+    connectedness guard so disconnects never flicker back to AirPods Stereo.
+  - Added `350 ms` connect settle delay, exact `HRESULT` failure logging, and capped automatic
+    backoff recovery to the wear-aware `IAudioClient3` keep-alive loop so `keepAliveActive`
+    never silently dies after `BTAGService` endpoint invalidations.
+  - Ordered wear automation so `SwitchAudioOutputToAirPods` runs before `PlayMedia` on insert
+    and `PauseMedia` runs before `RestorePreviousAudioOutput` on removal.
+- Fixed Left/Right AirPod delay during listening-mode switches, AAP post-handshake noise,
+  and high-refresh-rate Heart Rate CPU overhead (`Service/Protocol/HciProxyEngine.h/.cpp`,
+  `Service/Win/RadioBridgeSession.cpp`, `Service/Win/RegistryStore.cpp`,
+  `Source/Core/AirPods.h/.cpp`, `Source/Core/AirPodsServiceTransport_win.cpp`,
+  `Source/Gui/Widget/HeartRateCard.h/.cpp`):
+  - Tuned default Radio Service low-latency HCI polling from `3.75 ms` (6 slots, which starved
+    AirPods' single-radio primary-to-secondary inter-bud relay during A2DP playback) to
+    Apple-aligned `11.25 ms` (18 slots, still 55% faster than stock Windows' `25 ms`),
+    migrated legacy registry values, gave compact 4-buffer controllers (such as Intel BE200)
+    3 Windows A2DP ACL buffers + 1 dedicated AAP buffer, and prioritized hidden AAP control
+    packets ahead of queued Windows A2DP Bulk OUT bursts.
+  - Added rapid listening-mode switch coalescing, duplicate-mode suppression, unsolicited
+    RTBuddy startup cleanup, a 1.6 s initial `0x0F` notification recovery check, and decoupled
+    `audio_keep_alive` from overwriting `radio_service_low_latency_qos`.
+  - Capped `HeartRateCard` and `PopupHeartRateBar` pulse repaints to ~60 Hz on high-refresh
+    monitors (240–480 Hz) so active telemetry uses minimal CPU while keeping 0% idle CPU when
+    hidden.
 - Fixed radio proxy instability, USB speed misreporting, duplicate virtual ports, and ACL
   buffer overflow timeouts (`Service/Win/WinUsbRadio.cpp`, `Service/Win/RadioBridgeSession.cpp`,
   `Service/Win/UsbIpServer.h/.cpp`, `Service/Win/RadioEngine.cpp`,

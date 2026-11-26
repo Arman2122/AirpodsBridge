@@ -631,37 +631,6 @@ bool SetAudioEnhancementsViaPolicyConfig(
     return updatedAny;
 }
 
-bool SetDefaultAudioEndpoint(const QString &endpointId, bool includeCommunications)
-{
-    if (endpointId.isEmpty()) {
-        return false;
-    }
-
-    IPolicyConfig *policy = nullptr;
-    HRESULT hr = CoCreateInstance(
-        kClsidPolicyConfigClient, nullptr, CLSCTX_ALL, __uuidof(IPolicyConfig),
-        reinterpret_cast<void **>(&policy));
-    if (FAILED(hr) || policy == nullptr) {
-        LOG(Warn, "AudioControl: IPolicyConfig unavailable (hr={:#x}).", static_cast<uint32_t>(hr));
-        return false;
-    }
-
-    const std::wstring wideId = endpointId.toStdWString();
-    hr = policy->SetDefaultEndpoint(wideId.c_str(), eConsole);
-    if (SUCCEEDED(hr)) {
-        policy->SetDefaultEndpoint(wideId.c_str(), eMultimedia);
-        if (includeCommunications) {
-            policy->SetDefaultEndpoint(wideId.c_str(), eCommunications);
-        }
-    }
-    else {
-        LOG(Warn, "AudioControl: SetDefaultEndpoint failed (hr={:#x}).", static_cast<uint32_t>(hr));
-    }
-
-    policy->Release();
-    return SUCCEEDED(hr);
-}
-
 QString GetDefaultEndpointId(IMMDeviceEnumerator *enumerator, EDataFlow flow, ERole role)
 {
     if (enumerator == nullptr) {
@@ -679,6 +648,82 @@ QString GetDefaultEndpointId(IMMDeviceEnumerator *enumerator, EDataFlow flow, ER
     QString id = QString::fromWCharArray(rawId);
     CoTaskMemFree(rawId);
     return id;
+}
+
+bool SetDefaultAudioEndpoint(
+    IMMDeviceEnumerator *enumerator, EDataFlow flow, const QString &endpointId,
+    bool includeCommunications, bool *changedOut = nullptr)
+{
+    if (changedOut != nullptr) {
+        *changedOut = false;
+    }
+    if (endpointId.isEmpty()) {
+        return false;
+    }
+
+    const std::array<ERole, 3> allRoles{eConsole, eMultimedia, eCommunications};
+    const size_t roleCount = includeCommunications ? 3 : 2;
+
+    std::vector<ERole> rolesToUpdate;
+    rolesToUpdate.reserve(roleCount);
+    for (size_t i = 0; i < roleCount; ++i) {
+        const ERole role = allRoles[i];
+        const QString cur = GetDefaultEndpointId(enumerator, flow, role);
+        if (cur.compare(endpointId, Qt::CaseInsensitive) != 0) {
+            rolesToUpdate.push_back(role);
+        }
+    }
+
+    if (rolesToUpdate.empty()) {
+        return true; // Already default for every target role — avoid spurious device-change storms.
+    }
+
+    IPolicyConfig *policy = nullptr;
+    HRESULT hr = CoCreateInstance(
+        kClsidPolicyConfigClient, nullptr, CLSCTX_ALL, __uuidof(IPolicyConfig),
+        reinterpret_cast<void **>(&policy));
+    if (FAILED(hr) || policy == nullptr) {
+        LOG(Warn, "AudioControl: IPolicyConfig unavailable (hr={:#x}).", static_cast<uint32_t>(hr));
+        return false;
+    }
+
+    const std::wstring wideId = endpointId.toStdWString();
+    bool allOk = true;
+    bool anySet = false;
+    for (const ERole role : rolesToUpdate) {
+        HRESULT rhr = policy->SetDefaultEndpoint(wideId.c_str(), role);
+        if (FAILED(rhr)) {
+            Sleep(80);
+            rhr = policy->SetDefaultEndpoint(wideId.c_str(), role);
+        }
+        if (SUCCEEDED(rhr)) {
+            anySet = true;
+        }
+        else {
+            allOk = false;
+            LOG(Warn, "AudioControl: SetDefaultEndpoint(role={}) failed (hr={:#x}).",
+                static_cast<int>(role), static_cast<uint32_t>(rhr));
+        }
+    }
+
+    policy->Release();
+
+    if (changedOut != nullptr) {
+        *changedOut = anySet;
+    }
+    if (!allOk) {
+        return false;
+    }
+
+    // Verify the primary playback/capture role actually moved to the target endpoint.
+    if (enumerator != nullptr) {
+        const QString verified = GetDefaultEndpointId(enumerator, flow, eConsole);
+        if (!verified.isEmpty() && verified.compare(endpointId, Qt::CaseInsensitive) != 0) {
+            LOG(Warn, "AudioControl: default endpoint verification mismatch after switch.");
+            return false;
+        }
+    }
+    return true;
 }
 
 std::vector<AudioEndpoint> EnumerateEndpointsOnCurrentThread(EDataFlow flow)
@@ -858,7 +903,23 @@ public:
                 return;
             }
             _airPodsWorn = worn;
+            _keepAliveRetryCount = 0;
             UpdateKeepAliveState();
+        });
+    }
+
+    void SetBluetoothConnected(bool connected)
+    {
+        Post([this, connected] {
+            if (_bluetoothConnected == connected) {
+                return;
+            }
+            _bluetoothConnected = connected;
+            if (!connected) {
+                _pendingSwitchToAirPods = false;
+                ClearDeadline(_postSwitchVerifyDeadline);
+                ClearDeadline(_keepAliveStartDeadline);
+            }
         });
     }
 
@@ -871,7 +932,9 @@ public:
     {
         Post([this] {
             RememberCurrentNonAirPodsOutput();
-            if (_stereoActive && !_airPodsStereoRenderId.isEmpty()) {
+            if (_stereoActive && !_airPodsStereoRenderId.isEmpty() &&
+                IsEndpointActive(_airPodsStereoRenderId))
+            {
                 SwitchToAirPodsStereoInternal();
             }
             else {
@@ -1006,7 +1069,15 @@ public:
 
         Post([&] {
             RememberCurrentNonAirPodsOutput();
-            result.store(SwitchToAirPodsStereoInternal());
+            bool ok = SwitchToAirPodsStereoInternal();
+            if (!ok) {
+                // If the A2DP Stereo endpoint has not finished activating yet, arm a pending
+                // switch so playback still routes cleanly the moment `BthA2dp` comes online.
+                _pendingSwitchToAirPods = true;
+                _pendingSwitchDeadline =
+                    std::chrono::steady_clock::now() + std::chrono::seconds{15};
+            }
+            result.store(ok);
             {
                 std::lock_guard<std::mutex> lk{doneMutex};
                 done = true;
@@ -1228,6 +1299,26 @@ public:
     }
 
 private:
+    using Clock = std::chrono::steady_clock;
+
+    void ScheduleDeadline(std::optional<Clock::time_point> &slot, std::chrono::milliseconds delay)
+    {
+        const auto target = Clock::now() + delay;
+        {
+            std::lock_guard<std::mutex> lock{_queueMutex};
+            if (!slot.has_value() || target < slot.value()) {
+                slot = target;
+            }
+        }
+        _cv.notify_one();
+    }
+
+    void ClearDeadline(std::optional<Clock::time_point> &slot)
+    {
+        std::lock_guard<std::mutex> lock{_queueMutex};
+        slot.reset();
+    }
+
     void WorkerLoop()
     {
         const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -1248,10 +1339,24 @@ private:
         for (;;) {
             std::function<void()> task;
             bool duckQuietExpired = false;
+            bool postSwitchVerifyExpired = false;
+            bool keepAliveStartExpired = false;
             {
                 std::unique_lock<std::mutex> lock{_queueMutex};
-                if (_duckQuietDeadline.has_value()) {
-                    _cv.wait_until(lock, _duckQuietDeadline.value(), [this] {
+                std::optional<Clock::time_point> nextDeadline;
+                const auto consider = [&](const std::optional<Clock::time_point> &d) {
+                    if (d.has_value() &&
+                        (!nextDeadline.has_value() || d.value() < nextDeadline.value()))
+                    {
+                        nextDeadline = d.value();
+                    }
+                };
+                consider(_duckQuietDeadline);
+                consider(_postSwitchVerifyDeadline);
+                consider(_keepAliveStartDeadline);
+
+                if (nextDeadline.has_value()) {
+                    _cv.wait_until(lock, nextDeadline.value(), [this] {
                         return _stopping || !_tasks.empty();
                     });
                 }
@@ -1265,18 +1370,30 @@ private:
                     task = std::move(_tasks.front());
                     _tasks.pop_front();
                 }
-                else if (
-                    _duckQuietDeadline.has_value() &&
-                    std::chrono::steady_clock::now() >= _duckQuietDeadline.value())
-                {
-                    _duckQuietDeadline.reset();
-                    duckQuietExpired = true;
+                else {
+                    const auto now = Clock::now();
+                    if (_duckQuietDeadline.has_value() && now >= _duckQuietDeadline.value()) {
+                        _duckQuietDeadline.reset();
+                        duckQuietExpired = true;
+                    }
+                    if (_postSwitchVerifyDeadline.has_value() &&
+                        now >= _postSwitchVerifyDeadline.value())
+                    {
+                        _postSwitchVerifyDeadline.reset();
+                        postSwitchVerifyExpired = true;
+                    }
+                    if (_keepAliveStartDeadline.has_value() &&
+                        now >= _keepAliveStartDeadline.value())
+                    {
+                        _keepAliveStartDeadline.reset();
+                        keepAliveStartExpired = true;
+                    }
                 }
             }
             if (task) {
                 task();
             }
-            else if (duckQuietExpired) {
+            if (duckQuietExpired) {
                 if (_duckActive && _duckLevel > 2) {
                     LOG(Info,
                         "AudioControl: Conversation Awareness quiet timeout after level {}; "
@@ -1285,9 +1402,16 @@ private:
                     RestoreConversationDuckingInternal();
                 }
             }
+            if (postSwitchVerifyExpired) {
+                VerifyPostSwitchStateInternal();
+            }
+            if (keepAliveStartExpired) {
+                UpdateKeepAliveState();
+            }
         }
 
         RestoreConversationDuckingInternal();
+        StopWakePulse();
         StopKeepAlive();
         DetachSessionWatchers();
         if (_registeredDeviceEvents && _enumerator) {
@@ -1299,6 +1423,152 @@ private:
         if (SUCCEEDED(comHr)) {
             CoUninitialize();
         }
+    }
+
+    void StopWakePulse()
+    {
+        if (_wakePulseThread.joinable()) {
+            _wakePulseThread.join();
+        }
+    }
+
+    // Briefly opens and starts a shared-mode silent WASAPI render stream (160 ms) on the AirPods
+    // Stereo endpoint when KeepAlive is not already holding the endpoint open. Forces Windows'
+    // `BthA2dp.sys` to send `AVDTP_START` cleanly after an output switch or HFP call release so
+    // playback apps never land on a suspended/silent A2DP sink.
+    void TriggerA2dpWakePulseInternal()
+    {
+        if (_stopping || _keepAliveActive.load() || _airPodsStereoRenderId.isEmpty() ||
+            !_stereoActive || !IsEndpointActive(_airPodsStereoRenderId))
+        {
+            return;
+        }
+        if (_wakePulseInFlight.exchange(true)) {
+            return;
+        }
+        if (_wakePulseThread.joinable()) {
+            _wakePulseThread.join();
+        }
+        const QString endpointId = _airPodsStereoRenderId;
+        HANDLE shutdownEv = _shutdownEvent;
+        _wakePulseThread = std::thread{[this, endpointId, shutdownEv] {
+            const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            Support::OS::Windows::Com::UniquePtr<IMMDeviceEnumerator> enumerator;
+            Support::OS::Windows::Com::UniquePtr<IMMDevice> device;
+            Support::OS::Windows::Com::UniquePtr<IAudioClient> audioClient;
+            Support::OS::Windows::Com::UniquePtr<IAudioRenderClient> renderClient;
+            WAVEFORMATEX *mixFormat = nullptr;
+
+            if (SUCCEEDED(CoCreateInstance(
+                    __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, enumerator.GetIID(),
+                    reinterpret_cast<void **>(enumerator.ReleaseAndAddressOf()))) &&
+                enumerator)
+            {
+                const std::wstring wideId = endpointId.toStdWString();
+                if (SUCCEEDED(
+                        enumerator->GetDevice(wideId.c_str(), device.ReleaseAndAddressOf())) &&
+                    device &&
+                    SUCCEEDED(device->Activate(
+                        __uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                        reinterpret_cast<void **>(audioClient.ReleaseAndAddressOf()))) &&
+                    audioClient)
+                {
+                    REFERENCE_TIME defaultPeriod = 0;
+                    REFERENCE_TIME minPeriod = 0;
+                    UINT32 bufferFrames = 0;
+                    if (SUCCEEDED(audioClient->GetMixFormat(&mixFormat)) && mixFormat != nullptr &&
+                        SUCCEEDED(audioClient->GetDevicePeriod(&defaultPeriod, &minPeriod)) &&
+                        SUCCEEDED(audioClient->Initialize(
+                            AUDCLNT_SHAREMODE_SHARED, 0, defaultPeriod, 0, mixFormat, nullptr)) &&
+                        SUCCEEDED(audioClient->GetBufferSize(&bufferFrames)) && bufferFrames > 0 &&
+                        SUCCEEDED(audioClient->GetService(
+                            __uuidof(IAudioRenderClient),
+                            reinterpret_cast<void **>(renderClient.ReleaseAndAddressOf()))) &&
+                        renderClient)
+                    {
+                        BYTE *data = nullptr;
+                        if (SUCCEEDED(renderClient->GetBuffer(bufferFrames, &data))) {
+                            renderClient->ReleaseBuffer(bufferFrames, AUDCLNT_BUFFERFLAGS_SILENT);
+                        }
+                        if (SUCCEEDED(audioClient->Start())) {
+                            if (shutdownEv != nullptr) {
+                                WaitForSingleObject(shutdownEv, 160);
+                            }
+                            else {
+                                Sleep(160);
+                            }
+                            audioClient->Stop();
+                            LOG(Trace, "AudioControl: A2DP stream wake pulse completed.");
+                        }
+                    }
+                }
+            }
+
+            if (mixFormat != nullptr) {
+                CoTaskMemFree(mixFormat);
+            }
+            renderClient = nullptr;
+            audioClient = nullptr;
+            device = nullptr;
+            enumerator = nullptr;
+            if (SUCCEEDED(comHr)) {
+                CoUninitialize();
+            }
+            _wakePulseInFlight.store(false);
+        }};
+    }
+
+    void VerifyPostSwitchStateInternal()
+    {
+        if (_stopping || !_routedToAirPods || !_stereoActive || _airPodsStereoRenderId.isEmpty() ||
+            !_enumerator || !IsEndpointActive(_airPodsStereoRenderId))
+        {
+            return;
+        }
+        if (!_preferredMicId.isEmpty()) {
+            EnforcePreferredMicInternal();
+        }
+
+        // Re-verify all 3 render roles in case Windows BTAGService / PnP overrode
+        // `eCommunications` 200-400 ms after A2DP came online.
+        bool drifted = false;
+        if (SetDefaultAudioEndpoint(
+                _enumerator.operator->(), eRender, _airPodsStereoRenderId, true, &drifted) &&
+            drifted)
+        {
+            LOG(Info,
+                "AudioControl: restored drifted playback role(s) back to AirPods Stereo after "
+                "connect settle.");
+            TriggerA2dpWakePulseInternal();
+        }
+        if (_keepAliveEnabled && _airPodsWorn && !_keepAliveActive.load()) {
+            UpdateKeepAliveState();
+        }
+    }
+
+    void OnKeepAliveExitedUnexpectedly(const QString &endpointId, int64_t ranForMs)
+    {
+        if (_stopping || !_keepAliveEnabled || !_airPodsWorn || !_stereoActive ||
+            endpointId != _airPodsStereoRenderId)
+        {
+            return;
+        }
+        if (ranForMs >= 3000) {
+            _keepAliveRetryCount = 0;
+        }
+        if (_keepAliveRetryCount >= 4) {
+            LOG(Warn,
+                "AudioControl: keep-alive stream stopped repeatedly; waiting for next endpoint "
+                "or wear change.");
+            return;
+        }
+        static constexpr std::array<int, 4> kBackoffMs{600, 1200, 2400, 4000};
+        const int delayMs = kBackoffMs[static_cast<size_t>(_keepAliveRetryCount)];
+        ++_keepAliveRetryCount;
+        LOG(Info,
+            "AudioControl: scheduling wear-aware keep-alive recovery in {} ms (attempt {}/4).",
+            delayMs, _keepAliveRetryCount);
+        ScheduleDeadline(_keepAliveStartDeadline, std::chrono::milliseconds{delayMs});
     }
 
     void StopKeepAlive()
@@ -1319,6 +1589,7 @@ private:
 
     void UpdateKeepAliveState()
     {
+        ClearDeadline(_keepAliveStartDeadline);
         const bool shouldRun = !_stopping && _keepAliveEnabled && _airPodsWorn && _stereoActive &&
                                !_airPodsStereoRenderId.isEmpty();
 
@@ -1367,6 +1638,9 @@ private:
         WAVEFORMATEX *mixFormat = nullptr;
 
         bool started = false;
+        HRESULT failHr = S_OK;
+        const char *failStage = nullptr;
+        const auto startedAt = Clock::now();
         if (bufferEvent != nullptr &&
             SUCCEEDED(CoCreateInstance(
                 __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, enumerator.GetIID(),
@@ -1413,6 +1687,10 @@ private:
                                                      static_cast<double>(mixFormat->nSamplesPerSec);
                             }
                         }
+                        else {
+                            failHr = llHr;
+                            failStage = "InitializeSharedAudioStream";
+                        }
                     }
 
                     if (!initialized) {
@@ -1433,13 +1711,21 @@ private:
                     REFERENCE_TIME defaultPeriod = 0;
                     REFERENCE_TIME minPeriod = 0;
                     if (SUCCEEDED(audioClient->GetMixFormat(&mixFormat)) && mixFormat != nullptr &&
-                        SUCCEEDED(audioClient->GetDevicePeriod(&defaultPeriod, &minPeriod)) &&
-                        SUCCEEDED(audioClient->Initialize(
-                            AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                            defaultPeriod, 0, mixFormat, nullptr)))
+                        SUCCEEDED(audioClient->GetDevicePeriod(&defaultPeriod, &minPeriod)))
                     {
-                        initialized = true;
-                        negotiatedPeriodMs = static_cast<double>(defaultPeriod) / 10000.0;
+                        const HRESULT initHr = audioClient->Initialize(
+                            AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                            defaultPeriod, 0, mixFormat, nullptr);
+                        if (SUCCEEDED(initHr)) {
+                            initialized = true;
+                            failHr = S_OK;
+                            failStage = nullptr;
+                            negotiatedPeriodMs = static_cast<double>(defaultPeriod) / 10000.0;
+                        }
+                        else {
+                            failHr = initHr;
+                            failStage = "IAudioClient::Initialize";
+                        }
                     }
                 }
 
@@ -1457,7 +1743,8 @@ private:
                         renderClient->ReleaseBuffer(bufferFrames, AUDCLNT_BUFFERFLAGS_SILENT);
                     }
 
-                    if (SUCCEEDED(audioClient->Start())) {
+                    const HRESULT startHr = audioClient->Start();
+                    if (SUCCEEDED(startHr)) {
                         started = true;
                         _keepAliveActive.store(true);
                         if (lowLatencyEngineActive) {
@@ -1484,12 +1771,15 @@ private:
                                 continue;
                             }
                             if (wait != WAIT_OBJECT_0 + 1) {
+                                failStage = "WaitForMultipleObjects";
                                 break;
                             }
 
                             UINT32 padding = 0;
                             const HRESULT padHr = audioClient->GetCurrentPadding(&padding);
                             if (FAILED(padHr)) {
+                                failHr = padHr;
+                                failStage = "GetCurrentPadding";
                                 break;
                             }
                             if (padding >= bufferFrames) {
@@ -1499,16 +1789,24 @@ private:
                             BYTE *buf = nullptr;
                             const HRESULT bufHr = renderClient->GetBuffer(available, &buf);
                             if (FAILED(bufHr)) {
+                                failHr = bufHr;
+                                failStage = "GetBuffer";
                                 break;
                             }
                             const HRESULT relHr =
                                 renderClient->ReleaseBuffer(available, AUDCLNT_BUFFERFLAGS_SILENT);
                             if (FAILED(relHr)) {
+                                failHr = relHr;
+                                failStage = "ReleaseBuffer";
                                 break;
                             }
                         }
 
                         audioClient->Stop();
+                    }
+                    else {
+                        failHr = startHr;
+                        failStage = "IAudioClient::Start";
                     }
                 }
             }
@@ -1532,8 +1830,21 @@ private:
             CoUninitialize();
         }
 
+        const bool stoppedByRequest =
+            (stopEvent != nullptr && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0);
+        const int64_t ranForMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - startedAt).count();
         const bool wasActive = _keepAliveActive.exchange(false);
-        if (started || wasActive) {
+        if (!stoppedByRequest) {
+            LOG(Warn,
+                "AudioControl: WASAPI keep-alive exited unexpectedly at {} (hr={:#x}, ran={} ms).",
+                failStage != nullptr ? failStage : "Init", static_cast<uint32_t>(failHr), ranForMs);
+            Post([this, endpointId, ranForMs] {
+                RefreshLatencyDiagnosticsInternal(true);
+                OnKeepAliveExitedUnexpectedly(endpointId, ranForMs);
+            });
+        }
+        else if (started || wasActive) {
             Post([this] { RefreshLatencyDiagnosticsInternal(); });
         }
     }
@@ -1687,21 +1998,64 @@ private:
 
     bool SwitchToAirPodsStereoInternal()
     {
-        if (_airPodsStereoRenderId.isEmpty() || !_stereoActive || !_enumerator) {
+        if (_airPodsStereoRenderId.isEmpty() || !_stereoActive || !_enumerator ||
+            !IsEndpointActive(_airPodsStereoRenderId))
+        {
             return false;
         }
         RememberCurrentNonAirPodsOutput();
-        if (!SetDefaultAudioEndpoint(_airPodsStereoRenderId, true)) {
+
+        // Release AirPods HFP capture BEFORE routing playback to A2DP Stereo so any active
+        // voice app lets go of eSCO first and AirPods do not stay muted in Hands-Free mode.
+        if (!_preferredMicId.isEmpty()) {
+            EnforcePreferredMicInternal();
+        }
+
+        bool changed = false;
+        if (!SetDefaultAudioEndpoint(
+                _enumerator.operator->(), eRender, _airPodsStereoRenderId, true, &changed))
+        {
             return false;
         }
         _routedToAirPods = true;
         _pendingSwitchToAirPods = false;
-        LOG(Info, "AudioControl: switched default playback output to AirPods Stereo.");
+
+        if (changed) {
+            // Inspect endpoint mute/volume state for clear diagnostics and wake BthA2dp AVDTP.
+            float volPct = -1.0f;
+            BOOL muted = FALSE;
+            Support::OS::Windows::Com::UniquePtr<IMMDevice> dev;
+            const std::wstring wideId = _airPodsStereoRenderId.toStdWString();
+            if (SUCCEEDED(_enumerator->GetDevice(wideId.c_str(), dev.ReleaseAndAddressOf())) && dev)
+            {
+                Support::OS::Windows::Com::UniquePtr<IAudioEndpointVolume> vol;
+                if (SUCCEEDED(dev->Activate(
+                        __uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                        reinterpret_cast<void **>(vol.ReleaseAndAddressOf()))) &&
+                    vol)
+                {
+                    float scalar = 0.0f;
+                    if (SUCCEEDED(vol->GetMasterVolumeLevelScalar(&scalar))) {
+                        volPct = scalar * 100.0f;
+                    }
+                    vol->GetMute(&muted);
+                }
+            }
+            if (volPct >= 0.0f) {
+                LOG(Info,
+                    "AudioControl: switched default playback output to AirPods Stereo "
+                    "(vol={:.0f}%, "
+                    "mute={}).",
+                    volPct, muted != FALSE);
+            }
+            else {
+                LOG(Info, "AudioControl: switched default playback output to AirPods Stereo.");
+            }
+            TriggerA2dpWakePulseInternal();
+            ScheduleDeadline(_postSwitchVerifyDeadline, std::chrono::milliseconds{450});
+        }
         if (_volumeCapEnabled) {
             ApplyVolumeCapInternal();
-        }
-        if (!_preferredMicId.isEmpty()) {
-            EnforcePreferredMicInternal();
         }
         return true;
     }
@@ -1709,18 +2063,14 @@ private:
     bool RestorePreviousOutputInternal()
     {
         _routedToAirPods = false;
+        ClearDeadline(_postSwitchVerifyDeadline);
         if (_previousOutputId.isEmpty() || !IsEndpointActive(_previousOutputId)) {
             return false;
         }
-        if (_enumerator) {
-            const QString currentDefault =
-                GetDefaultEndpointId(_enumerator.operator->(), eRender, eConsole);
-            if (currentDefault.compare(_previousOutputId, Qt::CaseInsensitive) == 0) {
-                return true;
-            }
-        }
-        const bool ok = SetDefaultAudioEndpoint(_previousOutputId, true);
-        if (ok) {
+        bool changed = false;
+        const bool ok = SetDefaultAudioEndpoint(
+            _enumerator.operator->(), eRender, _previousOutputId, true, &changed);
+        if (ok && changed) {
             LOG(Info, "AudioControl: restored previous playback output.");
         }
         return ok;
@@ -1830,7 +2180,7 @@ private:
         if (_stereoActive) {
             const bool pendingNow = _pendingSwitchToAirPods &&
                                     std::chrono::steady_clock::now() <= _pendingSwitchDeadline;
-            if (pendingNow || (!wasStereoActive && _autoSwitchOnConnect)) {
+            if (pendingNow || (!wasStereoActive && _autoSwitchOnConnect && _bluetoothConnected)) {
                 SwitchToAirPodsStereoInternal();
             }
             else {
@@ -1844,12 +2194,25 @@ private:
         }
         else if (wasStereoActive) {
             _pendingSwitchToAirPods = false;
+            ClearDeadline(_postSwitchVerifyDeadline);
+            ClearDeadline(_keepAliveStartDeadline);
             if (_routedToAirPods && _autoSwitchOnConnect) {
                 RestorePreviousOutputInternal();
             }
         }
 
-        UpdateKeepAliveState();
+        // On fresh A2DP Stereo endpoint arrival, allow 350 ms for Windows BthA2dp + BTAGService
+        // PnP handshakes to settle before launching the WASAPI KeepAlive stream so BTAGService
+        // does not immediately invalidate it (`AUDCLNT_E_DEVICE_INVALIDATED`).
+        if (_stereoActive && !wasStereoActive && _keepAliveEnabled && _airPodsWorn &&
+            !_keepAliveActive.load())
+        {
+            _keepAliveRetryCount = 0;
+            ScheduleDeadline(_keepAliveStartDeadline, std::chrono::milliseconds{350});
+        }
+        else {
+            UpdateKeepAliveState();
+        }
         RefreshLatencyDiagnosticsInternal();
         RefreshHfpSessionState();
     }
@@ -1934,7 +2297,17 @@ private:
             if (SUCCEEDED(_enumerator->GetDevice(wideId.c_str(), dev.ReleaseAndAddressOf())) &&
                 dev && SUCCEEDED(dev->GetState(&state)) && state == DEVICE_STATE_ACTIVE)
             {
+                const bool recoveredFromHfp =
+                    CurrentProfile() == Core::AirPods::AudioProfile::HandsFree;
                 PublishProfile(Core::AirPods::AudioProfile::Stereo, {});
+                if (recoveredFromHfp && _routedToAirPods) {
+                    LOG(Info, "AudioControl: Hands-Free session ended; waking AirPods A2DP Stereo "
+                              "stream.");
+                    TriggerA2dpWakePulseInternal();
+                    if (_keepAliveEnabled && _airPodsWorn && !_keepAliveActive.load()) {
+                        ScheduleDeadline(_keepAliveStartDeadline, std::chrono::milliseconds{250});
+                    }
+                }
                 return;
             }
         }
@@ -1973,7 +2346,7 @@ private:
         }
 
         LOG(Info, "AudioControl: AirPods HFP took default microphone; restoring preferred mic.");
-        return SetDefaultAudioEndpoint(_preferredMicId, true);
+        return SetDefaultAudioEndpoint(_enumerator.operator->(), eCapture, _preferredMicId, true);
     }
 
     void ApplyVolumeCapInternal()
@@ -2184,6 +2557,7 @@ private:
     QString _preferredMicId;
     QString _previousOutputId;
     bool _stereoActive{false};
+    bool _bluetoothConnected{false};
     bool _autoSwitchOnConnect{true};
     bool _routedToAirPods{false};
     bool _pendingSwitchToAirPods{false};
@@ -2192,14 +2566,17 @@ private:
     uint32_t _volumeCapPercent{80};
     bool _keepAliveEnabled{false};
     bool _airPodsWorn{false};
+    int _keepAliveRetryCount{0};
     std::atomic<bool> _keepAliveActive{false};
+    std::atomic<bool> _wakePulseInFlight{false};
     std::atomic<bool> _latencyApplyInFlight{false};
     HANDLE _keepAliveStopEvent{nullptr};
     QString _keepAliveEndpointId;
     std::thread _keepAliveThread;
+    std::thread _wakePulseThread;
     std::vector<IAudioSessionManager2 *> _hfpSessionManagers;
     std::vector<IAudioSessionControl *> _watchedSessions;
-    // Conversation Awareness smooth media ducking state (worker thread + quiet deadline under
+    // Conversation Awareness smooth media ducking state + worker deadlines (guarded by
     // `_queueMutex`).
     bool _duckActive{false};
     uint8_t _duckLevel{0};
@@ -2207,6 +2584,8 @@ private:
     float _duckLastSetVolume{0.0f};
     Support::OS::Windows::Com::UniquePtr<IAudioEndpointVolume> _duckVolume;
     std::optional<std::chrono::steady_clock::time_point> _duckQuietDeadline;
+    std::optional<std::chrono::steady_clock::time_point> _postSwitchVerifyDeadline;
+    std::optional<std::chrono::steady_clock::time_point> _keepAliveStartDeadline;
 };
 
 Service::Service(QObject *parent) : QObject{parent}, _impl{std::make_unique<Impl>(this)} {}
@@ -2236,6 +2615,11 @@ void Service::SetKeepAliveEnabled(bool enabled)
 void Service::SetAirPodsWorn(bool worn)
 {
     _impl->SetAirPodsWorn(worn);
+}
+
+void Service::SetBluetoothConnected(bool connected)
+{
+    _impl->SetBluetoothConnected(connected);
 }
 
 void Service::SetAutoSwitchOnConnect(bool enabled)

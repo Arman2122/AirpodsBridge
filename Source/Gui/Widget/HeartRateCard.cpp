@@ -122,7 +122,12 @@ HeartRateCard::HeartRateCard(QWidget *parent) : QWidget{parent}
     _pulseAnim.setDuration(850);
     connect(&_pulseAnim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
         _pulsePhase = v.toReal();
-        update();
+        // Cap repaints to ~60 Hz on high-refresh displays (e.g. 240-480 Hz) so the pulsing
+        // heart stays butter-smooth without burning CPU repainting the sparkline 300 times/s.
+        if (!_lastPaintTimer.isValid() || _lastPaintTimer.elapsed() >= 16) {
+            _lastPaintTimer.restart();
+            update();
+        }
     });
 }
 
@@ -145,6 +150,15 @@ void HeartRateCard::hideEvent(QHideEvent *event)
     if (_pulseAnim.state() == QAbstractAnimation::Running) {
         _pulseAnim.stop();
         _pulsePhase = 0.0;
+    }
+}
+
+void HeartRateCard::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::EnabledChange) {
+        SyncPulseAnimation();
+        update();
     }
 }
 
@@ -549,7 +563,10 @@ PopupHeartRateBar::PopupHeartRateBar(QWidget *parent) : QWidget{parent}
     _pulseAnim.setDuration(850);
     connect(&_pulseAnim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
         _pulsePhase = v.toReal();
-        update();
+        if (!_lastPaintTimer.isValid() || _lastPaintTimer.elapsed() >= 16) {
+            _lastPaintTimer.restart();
+            update();
+        }
     });
 }
 
@@ -597,6 +614,15 @@ void PopupHeartRateBar::hideEvent(QHideEvent *event)
     if (_pulseAnim.state() == QAbstractAnimation::Running) {
         _pulseAnim.stop();
         _pulsePhase = 0.0;
+    }
+}
+
+void PopupHeartRateBar::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::EnabledChange) {
+        SyncPulseAnimation();
+        update();
     }
 }
 

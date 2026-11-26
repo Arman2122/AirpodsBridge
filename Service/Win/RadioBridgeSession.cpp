@@ -274,17 +274,23 @@ void RadioBridgeSession::PipeWorkerLoop(uint8_t pipeAddr, std::shared_ptr<PipeQu
             if (pq->stopped) {
                 break;
             }
-            if (!pq->queue.empty()) {
-                urb = std::move(pq->queue.front());
-                pq->queue.pop_front();
-            }
-            else if (pq->injectedPending) {
+            if (pipeAddr == _hciPipes.aclOutPipe && pq->injectedPending) {
+                // Prioritize tiny hidden AAP control packets ahead of queued Windows A2DP bursts
+                // whenever `windowsPduRemaining == 0` so listening-mode switches never stall behind
+                // audio queues. `DrainInjectedAcl` checks PDU boundaries atomically.
                 pq->injectedPending = false;
                 drainInjected = true;
             }
+            else if (!pq->queue.empty()) {
+                urb = std::move(pq->queue.front());
+                pq->queue.pop_front();
+            }
         }
 
-        if (urb) {
+        if (drainInjected && pipeAddr == _hciPipes.aclOutPipe) {
+            DrainInjectedAcl(pipeAddr);
+        }
+        else if (urb) {
             ExecuteUrb(pipeAddr, urb);
 
             if (!urb->internal) {
@@ -294,9 +300,6 @@ void RadioBridgeSession::PipeWorkerLoop(uint8_t pipeAddr, std::shared_ptr<PipeQu
             if (pipeAddr == _hciPipes.aclOutPipe) {
                 DrainInjectedAcl(pipeAddr);
             }
-        }
-        else if (drainInjected && pipeAddr == _hciPipes.aclOutPipe) {
-            DrainInjectedAcl(pipeAddr);
         }
     }
 

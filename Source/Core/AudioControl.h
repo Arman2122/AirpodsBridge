@@ -89,6 +89,7 @@ public:
     void SetVolumeCap(bool enabled, uint32_t maxPercent);
     void SetKeepAliveEnabled(bool enabled);
     void SetAirPodsWorn(bool worn);
+    void SetBluetoothConnected(bool connected);
     // When enabled (default), switches Windows default playback output to AirPods Stereo on
     // connect and restores the user's previous output device automatically on disconnect.
     void SetAutoSwitchOnConnect(bool enabled);

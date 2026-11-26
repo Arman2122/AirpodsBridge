@@ -154,6 +154,15 @@ private:
     std::chrono::steady_clock::time_point _adaptiveRequestedAt{};
     bool _adaptiveRetrySent{false};
     uint64_t _adaptiveLevelEpoch{0};
+    std::optional<uint8_t> _pendingAdaptiveLevelToSend;
+    // 1-slot in-flight listening-mode transaction state: AirPods Pro 2/3 drop any second 0x0D
+    // sent while an inter-bud DSP transition is still in progress. Rapid clicks coalesce into
+    // `_queuedNoiseMode` and dispatch the millisecond AirPods confirm the active transition.
+    bool _noiseModeInFlight{false};
+    NoiseControlMode _inFlightNoiseMode{NoiseControlMode::Off};
+    std::optional<NoiseControlMode> _queuedNoiseMode;
+    uint64_t _noiseModeInFlightEpoch{0};
+    std::optional<NoiseControlMode> _lastRequestedNoiseMode;
     // Mirrors the state manager's threshold for the disconnected path, which never reaches
     // the state manager. Rejects everything until the setting arrives.
     int16_t _rssiMin{std::numeric_limits<int16_t>::max()};
@@ -187,6 +196,10 @@ private:
     void HandleBoundDeviceConnectionStateChanged(Bluetooth::DeviceState state);
     void OnControlConnectionChanged(bool connected);
     void CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate);
+    void DispatchNoiseControlWire(
+        NoiseControlMode mode, bool supportsAllowOff, bool needAllowOffFirst,
+        bool needFeaturesFirst, uint64_t inFlightEpoch);
+    void FlushQueuedNoiseModeAfterTransition(uint64_t expectedEpoch);
     void OnControlPacketReceived(std::span<const uint8_t> packet);
     void StartHeartRateCampaignLater(bool resetAttempts);
     void RunHeartRateAttempt(uint64_t epoch, int attempt);

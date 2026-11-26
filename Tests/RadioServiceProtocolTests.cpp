@@ -69,6 +69,7 @@ private Q_SLOTS:
     void HciProxyDefersAapUntilAvdtpAndRetriesOnStall();
     void HciProxyNeverInterleavesWindowsFragmentedPdu();
     void HciProxyPullModeNeverInterleavesAndRevertsWriteErrors();
+    void HciProxyReservesCompactControllerAclBuffersConservatively();
     void HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods();
     void Uac1MicEmulatorDescriptorsAndAdaptiveAudio();
 };
@@ -620,6 +621,32 @@ void RadioServiceProtocolTests::HciProxyPullModeNeverInterleavesAndRevertsWriteE
     QCOMPARE(poppedHandle, kHandle);
 }
 
+void RadioServiceProtocolTests::HciProxyReservesCompactControllerAclBuffersConservatively()
+{
+    HciProxyEngine engine;
+    std::vector<uint8_t> winEvents;
+
+    // 4-buffer controller (e.g. Intel BE200): reserve 1 slot for hidden AAP so Windows keeps 3
+    // full A2DP audio buffers (+50% streaming headroom) while keeping 3 + 1 <= 4 overflow-proof.
+    const std::vector<uint8_t> evtBuf4 = {0x0E, 0x0B, 0x01, 0x05, 0x10, 0x00, 0x00,
+                                          0x01, 0x40, 0x04, 0x00, 0x04, 0x00};
+    engine.ProcessControllerEvents(evtBuf4, winEvents);
+    QCOMPARE(engine.GetTelemetry().aclTotalBuffers, uint16_t{4});
+    QCOMPARE(ReadLe16(winEvents, 9), uint16_t{3});
+
+    // 6-buffer controller: reserve 2 slots for hidden AAP, leaving Windows with 4.
+    const std::vector<uint8_t> evtBuf6 = {0x0E, 0x0B, 0x01, 0x05, 0x10, 0x00, 0x00,
+                                          0x01, 0x40, 0x06, 0x00, 0x04, 0x00};
+    engine.ProcessControllerEvents(evtBuf6, winEvents);
+    QCOMPARE(engine.GetTelemetry().aclTotalBuffers, uint16_t{6});
+    QCOMPARE(ReadLe16(winEvents, 9), uint16_t{4});
+
+    // Default ProxyConfig uses Apple-aligned 11.25 ms (18-slot) poll latency so AirPods'
+    // primary-to-secondary inter-bud ANC/DSP relay is never starved.
+    QCOMPARE(ProxyConfig{}.pollLatencyUs, 11250u);
+    QCOMPARE(HciProxyEngine::kDefaultPollLatencyUs, 11250u);
+}
+
 void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods()
 {
     constexpr uint64_t kAirPodsAddr = 0x102030405060ull;
@@ -633,7 +660,7 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
     HciProxyEngine engine{cb};
     engine.SetConfig(ProxyConfig{
         .lowLatencyQos = true,
-        .pollLatencyUs = 3750,
+        .pollLatencyUs = 11250,
         .declineHfp = true,
         .virtualMicEnabled = false,
     });
@@ -650,7 +677,7 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
             0x03, 0x0B, 0x00, 0x0D, 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x01, 0x00},
         out);
 
-    // 1. HCI_QoS_Setup (0x0807): tightens AirPods poll latency to 3750 us while preserving
+    // 1. HCI_QoS_Setup (0x0807): tightens AirPods poll latency to 11250 us while preserving
     //    spec-valid Service_Type and Delay_Variation so Intel/AirPods LMP QoS stays rock-solid.
     auto makeQos = [](uint16_t handle) {
         std::vector<uint8_t> cmd(23, 0);
@@ -672,7 +699,7 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
     auto qosAirPods = makeQos(kAirPodsHandle);
     QVERIFY(engine.ProcessWindowsCommand(qosAirPods));
     QCOMPARE(qosAirPods[6], uint8_t{0x01});
-    QCOMPARE(ReadLe32(qosAirPods, 15), 3750u);
+    QCOMPARE(ReadLe32(qosAirPods, 15), 11250u);
     QCOMPARE(ReadLe32(qosAirPods, 19), 0xFFFFFFFFu);
 
     auto qosMouse = makeQos(kMouseHandle);

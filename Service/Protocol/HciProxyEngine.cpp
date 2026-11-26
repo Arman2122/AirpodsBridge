@@ -421,9 +421,9 @@ bool HciProxyEngine::ProcessWindowsCommand(std::vector<uint8_t> &command)
     }
 
     // Rewrite Windows' default 25 ms ACL poll latency down to our configured low-latency target
-    // (3.75 ms) on tracked AirPods links while preserving Windows' spec-valid `Service_Type`
-    // (`0x01` Best Effort) and `Delay_Variation` (`0xFFFFFFFF`) so Intel/AirPods LMP QoS
-    // negotiation stays 100% compliant and never triggers link errors.
+    // (default 11.25 ms / 18 slots — 55% faster than stock Windows while leaving 12 free slots
+    // after each 3-DH5 A2DP packet for AirPods' single-radio primary-to-secondary inter-bud
+    // relay) while preserving Windows' spec-valid `Service_Type` and `Delay_Variation`.
     if (opcode == kCmdQosSetup && command.size() >= 23) {
         const uint16_t handle = static_cast<uint16_t>(ReadLe16(command, 3) & 0x0FFFu);
         if (const auto it = _aclLinks.find(handle);
@@ -832,13 +832,14 @@ void HciProxyEngine::HandleSingleEventLocked(
                     _aclMaxLength = maxLen;
                 }
                 _aclTotalBuffers = numBufs;
-                // Reserve up to 2 hardware ACL buffers exclusively for our hidden AAP channel by
-                // subtracting them from `HC_Total_Num_ACL_Data_Packets` reported to Windows.
-                // This guarantees Windows' A2DP stream + our AAP traffic can NEVER exceed the
-                // physical Bluetooth controller's ACL buffer pool (preventing USB EP 0x02 NAKs).
-                _reservedAclBuffers = numBufs >= 4
+                // Reserve disjoint hardware ACL buffer(s) exclusively for our hidden AAP channel
+                // by subtracting them from `HC_Total_Num_ACL_Data_Packets` reported to Windows.
+                // Reserve 1 slot on compact 3..5-buffer controllers (e.g. Intel BE200 has 4) so
+                // Windows keeps 3 full A2DP audio buffers (+50% headroom) while guaranteeing
+                // `windowsInFlight + ourInFlight <= numBufs`; reserve 2 slots when `numBufs >= 6`.
+                _reservedAclBuffers = numBufs >= 6
                                           ? static_cast<uint16_t>(kMaxOurOutstandingPerController)
-                                          : (numBufs == 3 ? uint16_t{1} : uint16_t{0});
+                                          : (numBufs >= 3 ? uint16_t{1} : uint16_t{0});
                 const uint16_t winBufs = static_cast<uint16_t>(numBufs - _reservedAclBuffers);
                 deferred.logs.emplace_back(
                     LogLevel::Info, "HCI Read_Buffer_Size: aclMaxLen=" + std::to_string(maxLen) +

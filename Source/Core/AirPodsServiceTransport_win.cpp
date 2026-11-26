@@ -293,17 +293,11 @@ bool ServiceControlTransport::SendPacket(std::span<const uint8_t> packet)
         static_cast<uint16_t>(Service::Protocol::MessageType::SendAapPacket), payload);
 }
 
-void ServiceControlTransport::SetLowLatencyMode(bool enabled)
+void ServiceControlTransport::SetLowLatencyMode(bool)
 {
-    RadioProxyOptions next;
-    {
-        std::lock_guard<std::mutex> lock{_mutex};
-        _options.lowLatencyQos = enabled;
-        next = _options;
-    }
-    if (_pipeConnected.load()) {
-        ApplyRadioProxyOptions(next);
-    }
+    // Radio Service low-latency HCI QoS is governed independently by `ApplyRadioProxyOptions`
+    // (`radio_service_low_latency_qos`), so toggling WASAPI `audio_keep_alive` must not overwrite
+    // the user's Radio Service QoS preference.
 }
 
 std::optional<RadioServiceInfo> ServiceControlTransport::GetRadioServiceInfo() const

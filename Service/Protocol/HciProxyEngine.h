@@ -30,8 +30,9 @@ namespace Service::Protocol {
 //     completions from `Number_Of_Completed_Packets` (0x13) so Windows' credit pool never
 //     drifts.
 //   - Rewrites `HCI_QoS_Setup` (0x0807) poll latency on tracked AirPods links when low-latency
-//     QoS is enabled (default 3750 us instead of Windows' 25000 us, preserving spec-valid
-//     Service_Type and Delay_Variation so Intel/AirPods LMP QoS negotiation never fails).
+//     QoS is enabled (default 11250 us / 18 BR/EDR slots instead of Windows' 25000 us, preserving
+//     spec-valid Service_Type and Delay_Variation plus headroom for primary-to-secondary inter-bud
+//     ANC/DSP sync so both earbuds switch listening modes together).
 //   - Supports pull-mode ACL injection so a single Bulk OUT owner pops injected packets right
 //     before writing to WinUSB, making Windows L2CAP fragment interleaving impossible.
 //   - Snoops AVDTP (PSM 0x0019) and optionally declines AirPods RFCOMM HFP (PSM 0x0003)
@@ -48,7 +49,7 @@ public:
     static constexpr uint8_t kFirstReservedSigId = 0xC0;
     static constexpr uint8_t kLastReservedSigId = 0xFE;
     static constexpr uint16_t kOurAapMtu = 2582;
-    static constexpr uint32_t kDefaultPollLatencyUs = 3750;
+    static constexpr uint32_t kDefaultPollLatencyUs = 11250;
 
     enum class LogLevel : uint8_t { Trace = 0, Info = 1, Warn = 2, Error = 3 };
 

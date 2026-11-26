@@ -169,7 +169,7 @@ void ApbApplication::EnsureRadioServiceEnabledOnStart()
                             _airPodsManager->ApplyRadioProxyOptions(
                                 Core::AirPods::RadioProxyOptions{
                                     .lowLatencyQos = f.radio_service_low_latency_qos,
-                                    .pollLatencyUs = 3750,
+                                    .pollLatencyUs = 11250,
                                     .declineHfp = f.radio_service_hfp_decline,
                                     .virtualMicEnabled = f.radio_service_virtual_mic,
                                 });
@@ -463,6 +463,7 @@ void ApbApplication::ConnectAirPodsManager()
             const bool justDisconnected = wasConnected && !connected;
             wasConnected = connected;
             _quickConnect->NotifyBluetoothConnected(connected);
+            _audioControl->SetBluetoothConnected(connected);
             _mainWindow->SetConnecting(false);
             if (!connected) {
                 _audioControl->SetAirPodsWorn(false);
@@ -616,7 +617,7 @@ void ApbApplication::ConnectGuiComponents()
                                         _airPodsManager->ApplyRadioProxyOptions(
                                             Core::AirPods::RadioProxyOptions{
                                                 .lowLatencyQos = f.radio_service_low_latency_qos,
-                                                .pollLatencyUs = 3750,
+                                                .pollLatencyUs = 11250,
                                                 .declineHfp = f.radio_service_hfp_decline,
                                                 .virtualMicEnabled = f.radio_service_virtual_mic,
                                             });
@@ -1034,7 +1035,7 @@ void ApbApplication::WireSettings()
         const auto f = Core::Settings::GetCurrent();
         manager->ApplyRadioProxyOptions(Core::AirPods::RadioProxyOptions{
             .lowLatencyQos = f.radio_service_low_latency_qos,
-            .pollLatencyUs = 3750,
+            .pollLatencyUs = 11250,
             .declineHfp = f.radio_service_hfp_decline,
             .virtualMicEnabled = f.radio_service_virtual_mic,
         });

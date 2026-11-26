@@ -81,9 +81,22 @@ void Engine::SetAutoConnectOnLidOpen(bool enable)
 
 void Engine::ApplyWearState(const AirPods::State &state)
 {
-    Perform(EarDetectionPolicy::OnStateChanged(_lastState, state, _earDetection));
-    Perform(_audioRoutePolicy.OnStateChanged(
-        _lastState, state, _smartAudioRouting, _earDetection.singleBud));
+    const MediaAction mediaAction =
+        EarDetectionPolicy::OnStateChanged(_lastState, state, _earDetection);
+    const AudioRouteAction routeAction = _audioRoutePolicy.OnStateChanged(
+        _lastState, state, _smartAudioRouting, _earDetection.singleBud);
+
+    // Order effects cleanly so players never start playing on the old output only to be
+    // yanked onto AirPods 50 ms later (which triggers Windows BthA2dp silent-switch glitches),
+    // and never leak sound onto speakers before pausing when AirPods are removed.
+    if (routeAction == AudioRouteAction::SwitchToAirPods) {
+        Perform(routeAction);
+        Perform(mediaAction);
+    }
+    else {
+        Perform(mediaAction);
+        Perform(routeAction);
+    }
     _lastState = state;
 }
 

@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 
+#include <QElapsedTimer>
 #include <QString>
 #include <QVariantAnimation>
 #include <QWidget>
@@ -56,12 +57,14 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private:
     void SyncPulseAnimation();
 
     Telemetry _telemetry;
     QVariantAnimation _pulseAnim{this};
+    QElapsedTimer _lastPaintTimer;
     qreal _pulsePhase{0.0};
 };
 
@@ -95,6 +98,7 @@ protected:
     void leaveEvent(QEvent *event) override;
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private:
     QRectF ActionPillRect() const;
@@ -102,6 +106,7 @@ private:
 
     HeartRateBarPresentation _presentation;
     QVariantAnimation _pulseAnim{this};
+    QElapsedTimer _lastPaintTimer;
     qreal _pulsePhase{0.0};
     bool _hoverBody{false};
     bool _hoverButton{false};

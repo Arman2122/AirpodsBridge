@@ -274,7 +274,10 @@ Protocol::ProxyConfig RegistryStore::LoadProxyConfig()
         return cfg;
     }
     cfg.lowLatencyQos = ReadDword(key, L"LowLatencyQos").value_or(1) != 0;
-    cfg.pollLatencyUs = ReadDword(key, L"PollLatencyUs").value_or(3750);
+    const uint32_t savedPollUs = ReadDword(key, L"PollLatencyUs").value_or(11250);
+    // Migrate legacy 3.75 ms (6-slot) setting that starved AirPods' primary-to-secondary
+    // inter-bud relay during A2DP playback up to the Apple-aligned 11.25 ms (18-slot) default.
+    cfg.pollLatencyUs = (savedPollUs < 7500 || savedPollUs > 50000) ? 11250u : savedPollUs;
     cfg.declineHfp = ReadDword(key, L"DeclineHfp").value_or(0) != 0;
     cfg.virtualMicEnabled = ReadDword(key, L"VirtualMicEnabled").value_or(0) != 0;
     RegCloseKey(key);

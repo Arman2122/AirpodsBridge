@@ -359,14 +359,13 @@ bool Manager::SendAapControl(
 
 bool Manager::SetNoiseControlMode(NoiseControlMode mode)
 {
-    LOG(Info, "AAP: requesting noise control mode '{}'.", Helper::ToString(mode));
-
     bool connected = false;
+    bool alreadyInMode = false;
+    bool queuedBehindInFlight = false;
     bool supportsAllowOff = false;
     bool needAllowOffFirst = false;
     bool needFeaturesFirst = false;
-    uint64_t offEpoch = 0;
-    uint64_t adaptiveEpoch = 0;
+    uint64_t inFlightEpoch = 0;
     PendingStateSignals pending;
 
     {
@@ -376,138 +375,223 @@ bool Manager::SetNoiseControlMode(NoiseControlMode mode)
             return false;
         }
 
+        const auto now = std::chrono::steady_clock::now();
         const auto state = _stateMgr.GetCurrentState();
-        const Model model =
-            state.has_value() && state->model != Model::Unknown ? state->model : _boundModel;
-        supportsAllowOff = CapabilitiesFor(model).supportsAllowOffMode;
+        const bool hasPendingSpecial =
+            (_pendingOffModeUntil != std::chrono::steady_clock::time_point{} &&
+             now < _pendingOffModeUntil) ||
+            (_pendingAdaptiveUntil != std::chrono::steady_clock::time_point{} &&
+             now < _pendingAdaptiveUntil);
 
-        if (mode == NoiseControlMode::Off && supportsAllowOff) {
-            const auto now = std::chrono::steady_clock::now();
-            offEpoch = ++_pendingOffModeEpoch;
-            _offModeRetrySent = false;
-            ++_pendingAdaptiveEpoch;
-            _pendingAdaptiveUntil = {};
-            _adaptiveRequestedAt = {};
-            _adaptiveRetrySent = false;
-            _userDisabledAllowOff = false;
-            needAllowOffFirst = !_allowOffSentToDevice || !state.has_value() ||
-                                state->noiseControl.allowOffListeningMode != std::optional{true};
-            _allowOffSentToDevice = true;
-            _pendingOffModeSendAt =
-                needAllowOffFirst ? (now + std::chrono::milliseconds{160}) : now;
-            _pendingOffModeUntil = now + std::chrono::milliseconds{needAllowOffFirst ? 1100 : 900};
-
-            if (needAllowOffFirst) {
-                if (auto u1 = _stateMgr.OnAapMessage(
-                        Aap::FeatureToggleNotification{
-                            .feature = Aap::ToggleFeature::AllowOffListeningMode, .enabled = true},
-                        _boundModel);
-                    u1.has_value())
-                {
-                    pending = PrepareStateChangedLocked(std::move(u1.value()));
-                }
-            }
-            if (auto u2 = _stateMgr.OnAapMessage(
-                    Aap::NoiseControlNotification{.mode = NoiseControlMode::Off}, _boundModel);
-                u2.has_value())
-            {
-                pending = PrepareStateChangedLocked(std::move(u2.value()));
-            }
+        if (!_noiseModeInFlight && !hasPendingSpecial && _lastRequestedNoiseMode == mode &&
+            state.has_value() && state->noiseControl.activeMode == mode)
+        {
+            alreadyInMode = true;
         }
-        else if (mode == NoiseControlMode::Adaptive) {
-            const auto now = std::chrono::steady_clock::now();
-            ++_pendingOffModeEpoch;
-            _pendingOffModeUntil = {};
-            _pendingOffModeSendAt = {};
-            _offModeRetrySent = false;
-            adaptiveEpoch = ++_pendingAdaptiveEpoch;
-            _adaptiveRetrySent = false;
-            _adaptiveRequestedAt = now;
-            needFeaturesFirst = !_aapFeaturesEnabledSent;
-            _aapFeaturesEnabledSent = true;
-            _pendingAdaptiveUntil = now + std::chrono::milliseconds{needFeaturesFirst ? 1100 : 900};
+        else if (_noiseModeInFlight) {
+            // AirPods Pro 2/3 silently drop a second 0x0D packet sent while an inter-bud mode
+            // transition is still underway. Update optimistic UI immediately and hold the latest
+            // target in `_queuedNoiseMode` so it dispatches the moment the current echo lands.
+            queuedBehindInFlight = true;
+            _lastRequestedNoiseMode = mode;
+            if (mode == _inFlightNoiseMode) {
+                _queuedNoiseMode.reset();
+            }
+            else {
+                _queuedNoiseMode = mode;
+            }
+            if (mode == NoiseControlMode::Adaptive) {
+                _adaptiveRequestedAt = now;
+            }
+            else {
+                _pendingAdaptiveLevelToSend.reset();
+            }
             if (auto u = _stateMgr.OnAapMessage(
-                    Aap::NoiseControlNotification{.mode = NoiseControlMode::Adaptive}, _boundModel);
+                    Aap::NoiseControlNotification{.mode = mode}, _boundModel);
                 u.has_value())
             {
                 pending = PrepareStateChangedLocked(std::move(u.value()));
             }
         }
         else {
-            ++_pendingOffModeEpoch;
-            _pendingOffModeUntil = {};
-            _pendingOffModeSendAt = {};
-            _offModeRetrySent = false;
-            ++_pendingAdaptiveEpoch;
-            _pendingAdaptiveUntil = {};
-            _adaptiveRequestedAt = {};
-            _adaptiveRetrySent = false;
+            _lastRequestedNoiseMode = mode;
+            _noiseModeInFlight = true;
+            _inFlightNoiseMode = mode;
+            _queuedNoiseMode.reset();
+            inFlightEpoch = ++_noiseModeInFlightEpoch;
+
+            const Model model =
+                state.has_value() && state->model != Model::Unknown ? state->model : _boundModel;
+            supportsAllowOff = CapabilitiesFor(model).supportsAllowOffMode;
+
+            if (mode == NoiseControlMode::Off && supportsAllowOff) {
+                ++_pendingOffModeEpoch;
+                _offModeRetrySent = false;
+                ++_pendingAdaptiveEpoch;
+                _pendingAdaptiveUntil = {};
+                _adaptiveRequestedAt = {};
+                _adaptiveRetrySent = false;
+                _pendingAdaptiveLevelToSend.reset();
+                _userDisabledAllowOff = false;
+                needAllowOffFirst =
+                    !_allowOffSentToDevice || !state.has_value() ||
+                    state->noiseControl.allowOffListeningMode != std::optional{true};
+                _allowOffSentToDevice = true;
+                const int sendOffsetMs = needAllowOffFirst ? 160 : 0;
+                _pendingOffModeSendAt = now + std::chrono::milliseconds{sendOffsetMs};
+                _pendingOffModeUntil = now + std::chrono::milliseconds{sendOffsetMs + 950};
+
+                if (needAllowOffFirst) {
+                    if (auto u1 = _stateMgr.OnAapMessage(
+                            Aap::FeatureToggleNotification{
+                                .feature = Aap::ToggleFeature::AllowOffListeningMode,
+                                .enabled = true},
+                            _boundModel);
+                        u1.has_value())
+                    {
+                        pending = PrepareStateChangedLocked(std::move(u1.value()));
+                    }
+                }
+                if (auto u2 = _stateMgr.OnAapMessage(
+                        Aap::NoiseControlNotification{.mode = NoiseControlMode::Off}, _boundModel);
+                    u2.has_value())
+                {
+                    pending = PrepareStateChangedLocked(std::move(u2.value()));
+                }
+            }
+            else if (mode == NoiseControlMode::Adaptive) {
+                ++_pendingOffModeEpoch;
+                _pendingOffModeUntil = {};
+                _pendingOffModeSendAt = {};
+                _offModeRetrySent = false;
+                ++_pendingAdaptiveEpoch;
+                _adaptiveRetrySent = false;
+                _adaptiveRequestedAt = now;
+                needFeaturesFirst = !_aapFeaturesEnabledSent;
+                _aapFeaturesEnabledSent = true;
+                const int sendOffsetMs = needFeaturesFirst ? 140 : 0;
+                _pendingAdaptiveUntil = now + std::chrono::milliseconds{sendOffsetMs + 950};
+                if (auto u = _stateMgr.OnAapMessage(
+                        Aap::NoiseControlNotification{.mode = NoiseControlMode::Adaptive},
+                        _boundModel);
+                    u.has_value())
+                {
+                    pending = PrepareStateChangedLocked(std::move(u.value()));
+                }
+            }
+            else {
+                ++_pendingOffModeEpoch;
+                _pendingOffModeUntil = {};
+                _pendingOffModeSendAt = {};
+                _offModeRetrySent = false;
+                ++_pendingAdaptiveEpoch;
+                _pendingAdaptiveUntil = {};
+                _adaptiveRequestedAt = {};
+                _adaptiveRetrySent = false;
+                _pendingAdaptiveLevelToSend.reset();
+                if (auto u = _stateMgr.OnAapMessage(
+                        Aap::NoiseControlNotification{.mode = mode}, _boundModel);
+                    u.has_value())
+                {
+                    pending = PrepareStateChangedLocked(std::move(u.value()));
+                }
+            }
         }
     }
 
-    if (mode == NoiseControlMode::Off && supportsAllowOff) {
-        EmitStateSignals(pending);
-        if (needAllowOffFirst) {
-            LOG(Info,
-                "AAP: enabling Allow \"Off\" Listening Mode (0x34) and scheduling Listening Off "
-                "in 160 ms.");
-            _controlTransport->SendPacket(Aap::BuildSetAllowOffListeningModePacket(true));
-            QMetaObject::invokeMethod(
-                this,
-                [this, offEpoch] {
-                    QTimer::singleShot(160, this, [this, offEpoch] {
-                        {
-                            std::lock_guard<std::mutex> lock{_mutex};
-                            if (!_aapConnected || _pendingOffModeEpoch != offEpoch ||
-                                !_controlTransport->IsConnected())
-                            {
-                                return;
-                            }
-                        }
-                        _controlTransport->SendPacket(
-                            Aap::BuildSetNoiseControlPacket(NoiseControlMode::Off));
-                    });
-                },
-                Qt::QueuedConnection);
-        }
-        else {
-            _controlTransport->SendPacket(Aap::BuildSetNoiseControlPacket(NoiseControlMode::Off));
-        }
+    if (alreadyInMode) {
         return true;
     }
 
-    if (mode == NoiseControlMode::Adaptive) {
+    if (queuedBehindInFlight) {
+        LOG(Info, "AAP: queued listening mode '{}' behind in-flight hardware transition.",
+            Helper::ToString(mode));
         EmitStateSignals(pending);
-        if (needFeaturesFirst) {
-            LOG(Info, "AAP: enabling H2 features (0x4D) before switching to Adaptive.");
-            _controlTransport->SendPacket(Aap::BuildEnableFeaturesPacket());
-            QMetaObject::invokeMethod(
-                this,
-                [this, adaptiveEpoch] {
-                    QTimer::singleShot(140, this, [this, adaptiveEpoch] {
-                        {
-                            std::lock_guard<std::mutex> lock{_mutex};
-                            if (!_aapConnected || _pendingAdaptiveEpoch != adaptiveEpoch ||
-                                !_controlTransport->IsConnected())
-                            {
-                                return;
-                            }
-                        }
-                        _controlTransport->SendPacket(
-                            Aap::BuildSetNoiseControlPacket(NoiseControlMode::Adaptive));
-                    });
-                },
-                Qt::QueuedConnection);
-        }
-        else {
-            _controlTransport->SendPacket(
-                Aap::BuildSetNoiseControlPacket(NoiseControlMode::Adaptive));
-        }
         return true;
     }
 
-    return SendAapControl(
-        Aap::BuildSetNoiseControlPacket(mode), Aap::NoiseControlNotification{.mode = mode});
+    LOG(Info, "AAP: requesting noise control mode '{}'.", Helper::ToString(mode));
+    EmitStateSignals(pending);
+    DispatchNoiseControlWire(
+        mode, supportsAllowOff, needAllowOffFirst, needFeaturesFirst, inFlightEpoch);
+    return true;
+}
+
+void Manager::DispatchNoiseControlWire(
+    NoiseControlMode mode, bool supportsAllowOff, bool needAllowOffFirst, bool needFeaturesFirst,
+    uint64_t inFlightEpoch)
+{
+    const auto sendAfter = [this, inFlightEpoch](int delayMs, NoiseControlMode targetMode) {
+        if (delayMs <= 0) {
+            _controlTransport->SendPacket(Aap::BuildSetNoiseControlPacket(targetMode));
+            return;
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [this, inFlightEpoch, delayMs, targetMode] {
+                QTimer::singleShot(delayMs, this, [this, inFlightEpoch, targetMode] {
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_aapConnected || _noiseModeInFlightEpoch != inFlightEpoch ||
+                            !_controlTransport->IsConnected())
+                        {
+                            return;
+                        }
+                    }
+                    _controlTransport->SendPacket(Aap::BuildSetNoiseControlPacket(targetMode));
+                });
+            },
+            Qt::QueuedConnection);
+    };
+
+    if (mode == NoiseControlMode::Off && supportsAllowOff && needAllowOffFirst) {
+        LOG(Info,
+            "AAP: enabling Allow \"Off\" Listening Mode (0x34) and scheduling Listening Off in "
+            "160 ms.");
+        _controlTransport->SendPacket(Aap::BuildSetAllowOffListeningModePacket(true));
+        sendAfter(160, NoiseControlMode::Off);
+    }
+    else if (mode == NoiseControlMode::Adaptive && needFeaturesFirst) {
+        LOG(Info, "AAP: enabling H2 features (0x4D) before switching to Adaptive.");
+        _controlTransport->SendPacket(Aap::BuildEnableFeaturesPacket());
+        sendAfter(140, NoiseControlMode::Adaptive);
+    }
+    else {
+        sendAfter(0, mode);
+    }
+
+    // Safety guard: release the in-flight slot if AirPods never echo (e.g. hardware was already
+    // in that mode or a transient RF glitch dropped the echo) so queued clicks never stall.
+    // AirPods Pro 3 back-to-back Adaptive/Off transitions can take up to ~2.7 s, so allow 3.2 s
+    // before forcing a timeout flush.
+    QMetaObject::invokeMethod(
+        this,
+        [this, inFlightEpoch] {
+            QTimer::singleShot(3200, this, [this, inFlightEpoch] {
+                FlushQueuedNoiseModeAfterTransition(inFlightEpoch);
+            });
+        },
+        Qt::QueuedConnection);
+}
+
+void Manager::FlushQueuedNoiseModeAfterTransition(uint64_t expectedEpoch)
+{
+    std::optional<NoiseControlMode> nextMode;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_noiseModeInFlight || _noiseModeInFlightEpoch != expectedEpoch) {
+            return;
+        }
+        _noiseModeInFlight = false;
+        nextMode = _queuedNoiseMode;
+        _queuedNoiseMode.reset();
+        if (nextMode.has_value()) {
+            _lastRequestedNoiseMode.reset();
+        }
+    }
+    if (nextMode.has_value()) {
+        SetNoiseControlMode(nextMode.value());
+    }
 }
 
 bool Manager::CycleNoiseControlMode()
@@ -606,7 +690,13 @@ bool Manager::SetAdaptiveNoiseLevel(uint8_t level)
         levelEpoch = ++_adaptiveLevelEpoch;
         const auto now = std::chrono::steady_clock::now();
         deferForModeSwitch = _adaptiveRequestedAt != std::chrono::steady_clock::time_point{} &&
-                             now - _adaptiveRequestedAt < std::chrono::milliseconds{220};
+                             now - _adaptiveRequestedAt < std::chrono::milliseconds{400};
+        if (deferForModeSwitch) {
+            _pendingAdaptiveLevelToSend = clamped;
+        }
+        else {
+            _pendingAdaptiveLevelToSend.reset();
+        }
         if (auto u = _stateMgr.OnAapMessage(
                 Aap::AdaptiveNoiseLevelNotification{.level = clamped}, _boundModel);
             u.has_value())
@@ -621,14 +711,16 @@ bool Manager::SetAdaptiveNoiseLevel(uint8_t level)
         QMetaObject::invokeMethod(
             this,
             [this, levelEpoch, clamped] {
-                QTimer::singleShot(180, this, [this, levelEpoch, clamped] {
+                QTimer::singleShot(380, this, [this, levelEpoch, clamped] {
                     {
                         std::lock_guard<std::mutex> lock{_mutex};
                         if (!_aapConnected || _adaptiveLevelEpoch != levelEpoch ||
+                            !_pendingAdaptiveLevelToSend.has_value() ||
                             !_controlTransport->IsConnected())
                         {
                             return;
                         }
+                        _pendingAdaptiveLevelToSend.reset();
                     }
                     _controlTransport->SendPacket(Aap::BuildSetAdaptiveNoiseLevelPacket(clamped));
                 });
@@ -1134,6 +1226,11 @@ void Manager::OnControlConnectionChanged(bool connected)
         _adaptiveRetrySent = false;
         ++_pendingAdaptiveEpoch;
         ++_adaptiveLevelEpoch;
+        _pendingAdaptiveLevelToSend.reset();
+        _noiseModeInFlight = false;
+        _queuedNoiseMode.reset();
+        ++_noiseModeInFlightEpoch;
+        _lastRequestedNoiseMode.reset();
         epoch = ++_heartRateEpoch;
 
         if (connected && !_deviceConnected) {
@@ -1213,7 +1310,7 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
     QMetaObject::invokeMethod(
         this,
         [this, epoch, resumeHeartRate] {
-            QTimer::singleShot(80, this, [this, epoch] {
+            QTimer::singleShot(100, this, [this, epoch] {
                 {
                     std::lock_guard<std::mutex> lock{_mutex};
                     if (!_aapConnected || _heartRateEpoch != epoch ||
@@ -1223,22 +1320,10 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
                 }
                 _controlTransport->SendPacket(Aap::BuildRequestNotificationsPacket());
             });
-            // Ask AirPods Pro 3 / Powerbeats Pro 2 to announce all RTBuddy sensor HID descriptors.
-            QTimer::singleShot(320, this, [this, epoch] {
-                std::vector<uint8_t> req;
-                {
-                    std::lock_guard<std::mutex> lock{_mutex};
-                    if (!_aapConnected || _heartRateEpoch != epoch ||
-                        !_controlTransport->IsConnected()) {
-                        return;
-                    }
-                    req = RtBuddy::BuildRequestAllDescriptorsPacket(NextRtBuddySeqLocked());
-                }
-                _controlTransport->SendPacket(req);
-            });
             // Proactively arm Allow "Off" Listening Mode (0x34) once per session on models that
-            // gate Off behind it (AirPods Pro 2/3, AirPods 4 ANC, AirPods 5) unless disabled.
-            QTimer::singleShot(480, this, [this, epoch] {
+            // gate Off behind it (AirPods Pro 2/3, AirPods 4 ANC, AirPods 5) unless disabled or
+            // already reported enabled by the AirPods.
+            QTimer::singleShot(650, this, [this, epoch] {
                 bool shouldArmAllowOff = false;
                 PendingStateSignals armPending;
                 {
@@ -1249,6 +1334,11 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
                         return;
                     }
                     const auto st = _stateMgr.GetCurrentState();
+                    if (st.has_value() &&
+                        st->noiseControl.allowOffListeningMode == std::optional{true}) {
+                        _allowOffSentToDevice = true;
+                        return;
+                    }
                     const Model model =
                         st.has_value() && st->model != Model::Unknown ? st->model : _boundModel;
                     if (CapabilitiesFor(model).supportsAllowOffMode) {
@@ -1271,8 +1361,28 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
                     EmitStateSignals(armPending);
                 }
             });
+            // If initial listening mode / metadata has not arrived within 1.6 s (e.g. AirPods
+            // were still settling A2DP when the first 0x0F arrived), send one clean retry of 0x0F
+            // so Controls populate immediately instead of waiting for the 30 s periodic dump.
+            QTimer::singleShot(1600, this, [this, epoch] {
+                bool needRetry = false;
+                {
+                    std::lock_guard<std::mutex> lock{_mutex};
+                    if (!_aapConnected || _heartRateEpoch != epoch ||
+                        !_controlTransport->IsConnected()) {
+                        return;
+                    }
+                    const auto st = _stateMgr.GetCurrentState();
+                    needRetry = !st.has_value() || !st->noiseControl.activeMode.has_value();
+                }
+                if (needRetry) {
+                    LOG(Info, "AAP: initial listening mode not yet received; re-requesting "
+                              "notifications (0x0F).");
+                    _controlTransport->SendPacket(Aap::BuildRequestNotificationsPacket());
+                }
+            });
             if (resumeHeartRate) {
-                QTimer::singleShot(750, this, [this, epoch] {
+                QTimer::singleShot(850, this, [this, epoch] {
                     {
                         std::lock_guard<std::mutex> lock{_mutex};
                         if (!_aapConnected || !_heartRateWanted || _heartRateEpoch != epoch) {
@@ -1431,6 +1541,8 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
     LogDecodedAapMessage(message.value());
 
     std::optional<uint8_t> convLevelToEmit;
+    std::optional<uint8_t> flushAdaptiveLevel;
+    std::optional<NoiseControlMode> nextQueuedNoiseMode;
     bool pauseHrForEar = false;
     bool resumeHrForEar = false;
     bool retryOffMode = false;
@@ -1451,6 +1563,10 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
             if (ncMsg->mode == NoiseControlMode::Adaptive) {
                 _pendingAdaptiveUntil = {};
                 _adaptiveRetrySent = false;
+                if (_pendingAdaptiveLevelToSend.has_value()) {
+                    flushAdaptiveLevel = _pendingAdaptiveLevelToSend;
+                    _pendingAdaptiveLevelToSend.reset();
+                }
             }
             if (ncMsg->mode == NoiseControlMode::Off) {
                 _pendingOffModeUntil = {};
@@ -1499,6 +1615,32 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
                     // Hardware rejected the retry as well; accept the actual echoed mode.
                     _pendingOffModeUntil = {};
                     _pendingOffModeSendAt = {};
+                    _noiseModeInFlight = false;
+                    ++_noiseModeInFlightEpoch;
+                }
+            }
+        }
+        if (!suppressNoiseEcho) {
+            if (const auto *ncEcho = std::get_if<Aap::NoiseControlNotification>(&message.value())) {
+                if (_noiseModeInFlight && ncEcho->mode == _inFlightNoiseMode) {
+                    _noiseModeInFlight = false;
+                    ++_noiseModeInFlightEpoch;
+                    if (_queuedNoiseMode.has_value()) {
+                        const NoiseControlMode queued = _queuedNoiseMode.value();
+                        _queuedNoiseMode.reset();
+                        if (queued != ncEcho->mode) {
+                            nextQueuedNoiseMode = queued;
+                            _lastRequestedNoiseMode.reset();
+                            suppressNoiseEcho = true;
+                        }
+                    }
+                }
+                else if (_noiseModeInFlight) {
+                    // Ignore a stale echo from an earlier mode while our new target is in flight.
+                    suppressNoiseEcho = true;
+                }
+                if (!suppressNoiseEcho) {
+                    _lastRequestedNoiseMode = ncEcho->mode;
                 }
             }
         }
@@ -1567,6 +1709,21 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
     }
 
     EmitStateSignals(pending);
+
+    if (flushAdaptiveLevel.has_value()) {
+        _controlTransport->SendPacket(
+            Aap::BuildSetAdaptiveNoiseLevelPacket(flushAdaptiveLevel.value()));
+    }
+
+    if (nextQueuedNoiseMode.has_value()) {
+        const NoiseControlMode target = nextQueuedNoiseMode.value();
+        QMetaObject::invokeMethod(
+            this,
+            [this, target] {
+                QTimer::singleShot(40, this, [this, target] { SetNoiseControlMode(target); });
+            },
+            Qt::QueuedConnection);
+    }
 
     if (retryOffMode) {
         LOG(Info,

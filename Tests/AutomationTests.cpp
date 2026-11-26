@@ -32,10 +32,12 @@ public:
     void PlayMedia() override
     {
         actions.append("play");
+        timeline.append("play");
     }
     void PauseMedia() override
     {
         actions.append("pause");
+        timeline.append("pause");
     }
     void Notify(const QString &title, const QString &text) override
     {
@@ -48,15 +50,18 @@ public:
     void SwitchAudioOutputToAirPods() override
     {
         routeActions.append("airpods");
+        timeline.append("airpods");
     }
     void RestorePreviousAudioOutput() override
     {
         routeActions.append("restore");
+        timeline.append("restore");
     }
 
     QStringList actions;
     QStringList notifications;
     QStringList routeActions;
+    QStringList timeline;
     int connectRequests{0};
 };
 
@@ -80,6 +85,7 @@ private Q_SLOTS:
     void FullChargeAlertFiresOnceAndRearmsBelowThreshold();
     void SmartAudioRoutingSwitchesOnWearAndRestoresOnRemoval();
     void EngineCarriesDecisionsToEffects();
+    void EngineOrdersAudioRoutingBeforePlayAndPauseBeforeRestore();
     void BleWearJitterIsDebouncedAndPostDisconnectSuppressesLoop();
 };
 
@@ -351,6 +357,28 @@ void AutomationTests::EngineCarriesDecisionsToEffects()
     engine.OnDeviceConnectionChanged(true);
     engine.OnLidOpenedNearby(); // connected: nothing to do
     QCOMPARE(effects.connectRequests, 1);
+}
+
+void AutomationTests::EngineOrdersAudioRoutingBeforePlayAndPauseBeforeRestore()
+{
+    RecordingEffects effects;
+    Engine engine{effects};
+    engine.SetEarDetectionEnabled(true);
+    engine.SetEarDetectionResumePlayback(true);
+    engine.SetSmartAudioRouting(true);
+
+    engine.OnDeviceConnectionChanged(true);
+    // Start unworn, then put both buds in -> MUST switch output to AirPods BEFORE PlayMedia().
+    engine.OnStateUpdated(MakeState(false, false));
+    QVERIFY(effects.timeline.isEmpty());
+
+    engine.OnStateUpdated(MakeState(true, true));
+    QCOMPARE(effects.timeline, (QStringList{"airpods", "play"}));
+
+    // Remove a bud -> MUST pause media BEFORE restoring speakers.
+    effects.timeline.clear();
+    engine.OnStateUpdated(MakeState(true, false));
+    QCOMPARE(effects.timeline, (QStringList{"pause", "restore"}));
 }
 
 void AutomationTests::BleWearJitterIsDebouncedAndPostDisconnectSuppressesLoop()

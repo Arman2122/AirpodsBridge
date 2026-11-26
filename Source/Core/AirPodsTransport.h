@@ -14,7 +14,7 @@ namespace Core::AirPods {
 
 struct RadioProxyOptions {
     bool lowLatencyQos{true};
-    uint32_t pollLatencyUs{3750};
+    uint32_t pollLatencyUs{11250};
     bool declineHfp{false};
     bool virtualMicEnabled{false};
 
