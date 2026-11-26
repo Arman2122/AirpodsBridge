@@ -113,14 +113,16 @@ bool WinUsbRadio::Open(const std::wstring &devicePath)
     }
 
     // Query device speed.
-    uint8_t speedByte = 1;
+    // Note: WinUsb_QueryDeviceInformation(DEVICE_SPEED) returns 0x01 (`LowSpeed`) for BOTH
+    // Low-Speed and Full-Speed USB devices. Bluetooth HCI adapters use Bulk + Isochronous
+    // endpoints (which USB 2.0 forbids on 1.5 Mbps Low-Speed), so 0x01 / 0x02 is Full-Speed
+    // (12 Mbps = USB/IP speed 2). Reporting speed 1 (`Low Speed`) breaks usbip2_ude Bulk pipes.
+    uint8_t speedByte = FullSpeed;
     ULONG speedLen = sizeof(speedByte);
     uint32_t usbIpSpeed = Protocol::UsbIp::kSpeedFull;
     if (WinUsb_QueryDeviceInformation(primary.Get(), DEVICE_SPEED, &speedLen, &speedByte)) {
         switch (speedByte) {
         case LowSpeed:
-            usbIpSpeed = Protocol::UsbIp::kSpeedLow;
-            break;
         case FullSpeed:
             usbIpSpeed = Protocol::UsbIp::kSpeedFull;
             break;
@@ -553,8 +555,9 @@ void WinUsbRadio::ConfigureHciPoliciesLocked()
             zlpOk = WinUsb_SetPipePolicy(
                 outIface, _hciPipes.aclOutPipe, SHORT_PACKET_TERMINATE, sizeof(enable), &enable);
 
-            // Guarantee Bulk OUT writes never block indefinitely if the controller NAKs/stalls.
-            ULONG outTimeoutMs = 2000;
+            // Bound Bulk OUT writes so a dead endpoint cannot hang forever while leaving plenty of
+            // headroom (4 s) for transient Bluetooth baseband retransmissions without false alarms.
+            ULONG outTimeoutMs = 4000;
             aclOutTimeoutOk = WinUsb_SetPipePolicy(
                 outIface, _hciPipes.aclOutPipe, PIPE_TRANSFER_TIMEOUT, sizeof(outTimeoutMs),
                 &outTimeoutMs);

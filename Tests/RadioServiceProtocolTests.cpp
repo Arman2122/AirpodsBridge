@@ -295,11 +295,15 @@ void RadioServiceProtocolTests::HciProxyHiddenAapHandshakeAndDataIsolation()
     QCOMPARE(winEvents, evtReset);
 
     // 2. Read_Buffer_Size complete -> maxLen=256, numBufs=6.
+    //    HciProxyEngine reserves 2 buffers for hidden AAP so Windows sees 4 and can never
+    //    overflow the controller's hardware ACL pool during A2DP audio streaming.
     const std::vector<uint8_t> evtBuf = {0x0E, 0x0B, 0x01, 0x05, 0x10, 0x00, 0x00,
                                          0x01, 0x40, 0x06, 0x00, 0x04, 0x00};
     engine.ProcessControllerEvents(evtBuf, winEvents);
     QCOMPARE(engine.GetTelemetry().aclMaxLength, uint16_t{256});
     QCOMPARE(engine.GetTelemetry().aclTotalBuffers, uint16_t{6});
+    QCOMPARE(winEvents.size(), evtBuf.size());
+    QCOMPARE(ReadLe16(winEvents, 9), uint16_t{4});
 
     // 3. Connection_Complete (ACL, unencrypted) -> should NOT open AAP until encrypted.
     engine.OpenAapChannel(kAirPodsAddr);

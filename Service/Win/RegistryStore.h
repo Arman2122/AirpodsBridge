@@ -24,6 +24,9 @@ public:
     static std::optional<std::wstring> GetStoredRadioInstance();
     static void SetStoredRadioInstance(const std::optional<std::wstring> &instanceId);
 
+    static std::optional<std::string> GetStoredAdapterName();
+    static void SetStoredAdapterName(const std::string &displayName);
+
     static std::vector<std::wstring> GetBoundInstances();
     static void RememberBoundInstance(const std::wstring &instanceId);
     static void ClearBoundInstances();

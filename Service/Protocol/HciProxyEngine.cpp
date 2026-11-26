@@ -752,11 +752,10 @@ bool HciProxyEngine::CanInjectOnHandleLocked(const AclLink &link) const
     if (link.windowsPduRemaining > 0) {
         return false;
     }
-    // Keep controller ACL buffer usage bounded so Windows' audio/HID traffic never starves.
+    // Only ever occupy the disjoint hardware ACL buffers we reserved from Windows in
+    // `HCI_Read_Buffer_Size`, guaranteeing `windowsInFlight + ourInFlight <= _aclTotalBuffers`.
     const uint32_t maxSlots =
-        _aclTotalBuffers > 2
-            ? std::min<uint32_t>(kMaxOurOutstandingPerController, _aclTotalBuffers - 1)
-            : 1u;
+        _reservedAclBuffers > 0 ? static_cast<uint32_t>(_reservedAclBuffers) : 1u;
     return _totalOurOutstanding < maxSlots;
 }
 
@@ -833,6 +832,26 @@ void HciProxyEngine::HandleSingleEventLocked(
                     _aclMaxLength = maxLen;
                 }
                 _aclTotalBuffers = numBufs;
+                // Reserve up to 2 hardware ACL buffers exclusively for our hidden AAP channel by
+                // subtracting them from `HC_Total_Num_ACL_Data_Packets` reported to Windows.
+                // This guarantees Windows' A2DP stream + our AAP traffic can NEVER exceed the
+                // physical Bluetooth controller's ACL buffer pool (preventing USB EP 0x02 NAKs).
+                _reservedAclBuffers = numBufs >= 4
+                                          ? static_cast<uint16_t>(kMaxOurOutstandingPerController)
+                                          : (numBufs == 3 ? uint16_t{1} : uint16_t{0});
+                const uint16_t winBufs = static_cast<uint16_t>(numBufs - _reservedAclBuffers);
+                deferred.logs.emplace_back(
+                    LogLevel::Info, "HCI Read_Buffer_Size: aclMaxLen=" + std::to_string(maxLen) +
+                                        ", hwAclBufs=" + std::to_string(numBufs) +
+                                        ", reservedForAap=" + std::to_string(_reservedAclBuffers) +
+                                        ", windowsBufs=" + std::to_string(winBufs));
+                if (_reservedAclBuffers > 0) {
+                    std::vector<uint8_t> rewritten(evt.begin(), evt.end());
+                    WriteLe16(rewritten, 9, winBufs);
+                    forwardToWindows.insert(
+                        forwardToWindows.end(), rewritten.begin(), rewritten.end());
+                    return;
+                }
             }
             else if (opcode == kCmdReadBdAddr && status == 0 && evt.size() >= 12) {
                 _localAddress = ReadBdAddrLe(evt.subspan(6, 6));

@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <regex>
+#include <sstream>
 #include <vector>
 
 namespace Service::Win {
@@ -105,6 +106,18 @@ void UsbIpServer::UnexportDevice(const std::string &busId)
 {
     std::lock_guard<std::mutex> lock{_mutex};
     _devices.erase(busId);
+    _busyBusIds.erase(busId);
+}
+
+void UsbIpServer::SetBusIdBusy(const std::string &busId, bool busy)
+{
+    std::lock_guard<std::mutex> lock{_mutex};
+    if (busy) {
+        _busyBusIds.insert(busId);
+    }
+    else {
+        _busyBusIds.erase(busId);
+    }
 }
 
 bool UsbIpServer::RecvExact(SOCKET s, uint8_t *dst, size_t len)
@@ -195,13 +208,26 @@ void UsbIpServer::HandleHandshake(UniqueSocket client)
         const std::string busId{busIdBuf};
 
         std::optional<Protocol::UsbIp::ExportedDevice> found;
+        bool busy = false;
         ImportCallback cb;
         {
             std::lock_guard<std::mutex> lock{_mutex};
-            if (const auto it = _devices.find(busId); it != _devices.end()) {
+            if (_busyBusIds.find(busId) != _busyBusIds.end()) {
+                busy = true;
+            }
+            else if (const auto it = _devices.find(busId); it != _devices.end()) {
                 found = it->second;
             }
             cb = _onImport;
+        }
+
+        if (busy) {
+            const auto errReply = Protocol::UsbIp::EncodeOpRepImport(nullptr, 1);
+            SendAll(client.Get(), errReply.data(), errReply.size());
+            ServiceLog::Write(
+                LogLevel::Warn, "usbip",
+                "Rejected duplicate import for already-active busId: " + busId);
+            return;
         }
 
         if (!found.has_value()) {
@@ -319,6 +345,51 @@ bool UsbIpServer::DetachLocalPort(int usbipPort)
             "usbip detach -p " + std::to_string(usbipPort) + " returned error: " + out);
     }
     return ok;
+}
+
+uint32_t UsbIpServer::DetachAllPortsForBusId(const std::string &busId)
+{
+    std::string out;
+    if (!RunUsbipCommand(L"port", out, 10000) || out.empty()) {
+        return 0;
+    }
+
+    static const std::regex kPortLineRe{R"(Port\s+(\d+)\s*:)", std::regex_constants::icase};
+    const std::string needle = "/" + busId;
+
+    std::vector<int> matchingPorts;
+    std::istringstream iss{out};
+    std::string line;
+    int currentPort = 0;
+    while (std::getline(iss, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+        {
+            line.pop_back();
+        }
+        std::smatch m;
+        if (std::regex_search(line, m, kPortLineRe)) {
+            currentPort = std::stoi(m[1].str());
+            continue;
+        }
+        if (currentPort > 0 && line.find("127.0.0.1:") != std::string::npos &&
+            line.size() >= needle.size() &&
+            line.compare(line.size() - needle.size(), needle.size(), needle) == 0)
+        {
+            matchingPorts.push_back(currentPort);
+            currentPort = 0;
+        }
+    }
+
+    uint32_t detached = 0;
+    for (int port : matchingPorts) {
+        if (DetachLocalPort(port)) {
+            ++detached;
+            ServiceLog::Write(
+                LogLevel::Info, "usbip",
+                "Detached stale virtual port " + std::to_string(port) + " for busId " + busId);
+        }
+    }
+    return detached;
 }
 
 } // namespace Service::Win

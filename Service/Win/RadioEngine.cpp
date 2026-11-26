@@ -6,6 +6,7 @@
 #include "Service/Win/RegistryStore.h"
 #include "Service/Win/ServiceLog.h"
 
+#include <cctype>
 #include <chrono>
 
 namespace Service::Win {
@@ -14,6 +15,43 @@ namespace {
 
 constexpr const char *kRadioBusId = "1-1";
 constexpr const char *kMicBusId = "1-2";
+
+bool IsGenericWinUsbName(std::string_view name)
+{
+    if (name.empty()) {
+        return true;
+    }
+    std::string lower;
+    lower.reserve(name.size());
+    for (char c : name) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return lower.find("winusb") != std::string::npos || lower == "usb device";
+}
+
+std::string FriendlyAdapterNameFromVid(uint16_t vid)
+{
+    switch (vid) {
+    case 0x8087:
+        return "Intel Wireless Bluetooth";
+    case 0x0BDA:
+        return "Realtek Bluetooth";
+    case 0x0A5C:
+        return "Broadcom Bluetooth";
+    case 0x0E8D:
+        return "MediaTek Bluetooth";
+    case 0x0CF3:
+    case 0x0489:
+    case 0x13D3:
+        return "Qualcomm Bluetooth";
+    case 0x0A12:
+        return "CSR Bluetooth";
+    case 0x05AC:
+        return "Apple Bluetooth";
+    default:
+        return "USB Bluetooth Adapter";
+    }
+}
 
 LogLevel ToWinSeverity(Protocol::HciProxyEngine::LogLevel lvl)
 {
@@ -322,11 +360,22 @@ void RadioEngine::RunTakeoverCycle()
     }
 
     const AdapterCandidate adapter = *search.adapter;
+    std::string friendlyName = adapter.displayName;
+    if (!IsGenericWinUsbName(friendlyName)) {
+        RegistryStore::SetStoredAdapterName(friendlyName);
+    }
+    else if (const auto saved = RegistryStore::GetStoredAdapterName();
+             saved.has_value() && !IsGenericWinUsbName(*saved))
+    {
+        friendlyName = *saved;
+    }
+    else {
+        friendlyName = FriendlyAdapterNameFromVid(adapter.vid);
+    }
     {
         std::lock_guard<std::mutex> lock{_stateMutex};
         _activeAdapterInstance = adapter.instanceId;
-        _activeAdapterDisplayName =
-            adapter.displayName.empty() ? "USB Bluetooth Adapter" : adapter.displayName;
+        _activeAdapterDisplayName = std::move(friendlyName);
         _activeAdapterVid = adapter.vid;
         _activeAdapterPid = adapter.pid;
     }
@@ -393,7 +442,10 @@ void RadioEngine::RunTakeoverCycle()
         return;
     }
 
-    // 3. Export physical radio over localhost USB/IP and attach via signed usbip-win2.
+    // 3. Clean up any stale virtual ports left over from an earlier session/crash, then export
+    //    the physical radio over localhost USB/IP and attach cleanly via signed usbip-win2.
+    UsbIpServer::DetachAllPortsForBusId(kRadioBusId);
+    _usbIp.SetBusIdBusy(kRadioBusId, false);
     _usbIp.ExportDevice(_radio.MakeExportedDevice(kRadioBusId));
     const auto portOpt = _usbIp.AttachLocalDevice(kRadioBusId);
     if (!portOpt.has_value()) {
@@ -444,7 +496,8 @@ void RadioEngine::RunTakeoverCycle()
         return;
     }
 
-    // 4. Bridge is live!
+    // 4. Bridge is live! Reject duplicate import attempts on 1-1 while this session owns it.
+    _usbIp.SetBusIdBusy(kRadioBusId, true);
     _watchdog.MarkSessionStarted(SteadyNowMs());
     {
         std::lock_guard<std::mutex> lock{_stateMutex};
@@ -497,7 +550,10 @@ void RadioEngine::RunTakeoverCycle()
     }
 
     _hci.Reset("radio bridge session ended");
-    UsbIpServer::DetachLocalPort(attachedPort);
+    _usbIp.SetBusIdBusy(kRadioBusId, false);
+    if (!UsbIpServer::DetachLocalPort(attachedPort)) {
+        UsbIpServer::DetachAllPortsForBusId(kRadioBusId);
+    }
     _usbIp.UnexportDevice(kRadioBusId);
     _radio.Close();
 

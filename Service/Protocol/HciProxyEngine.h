@@ -249,6 +249,7 @@ private:
     bool _aclFramed{false};
     uint16_t _aclMaxLength{1021};
     uint16_t _aclTotalBuffers{0};
+    uint16_t _reservedAclBuffers{0};
     uint32_t _totalOurOutstanding{0};
     uint16_t _nextLocalCid{kFirstReservedCid};
     uint8_t _nextSigId{kFirstReservedSigId};

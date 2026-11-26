@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "Service/Protocol/UsbIpProtocol.h"
 #include "Service/Win/WinHandles.h"
@@ -43,11 +44,15 @@ public:
 
     void ExportDevice(const Protocol::UsbIp::ExportedDevice &device);
     void UnexportDevice(const std::string &busId);
+    void SetBusIdBusy(const std::string &busId, bool busy);
 
     // Invokes `usbip.exe` (installed by usbip-win2) to attach/detach an exported device on
     // 127.0.0.1:<port>. Returns the assigned usbip port number on attach, or std::nullopt.
     std::optional<int> AttachLocalDevice(const std::string &busId);
     static bool DetachLocalPort(int usbipPort);
+    // Detaches every localhost usbip-win2 port currently bound to `/<busId>` so stale ports from
+    // earlier sessions or crashes can never duplicate the virtual Bluetooth adapter.
+    static uint32_t DetachAllPortsForBusId(const std::string &busId);
 
     // Blocking exact socket I/O helpers shared by bridge sessions.
     static bool RecvExact(SOCKET s, uint8_t *dst, size_t len);
@@ -67,6 +72,7 @@ private:
     mutable std::mutex _mutex;
     ImportCallback _onImport;
     std::unordered_map<std::string, Protocol::UsbIp::ExportedDevice> _devices;
+    std::unordered_set<std::string> _busyBusIds;
 };
 
 } // namespace Service::Win

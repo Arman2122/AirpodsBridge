@@ -14,12 +14,12 @@ namespace Service::Win {
 
 namespace {
 
-constexpr uint32_t kMaxConsecutiveAclOutTimeouts = 5;
+constexpr uint32_t kMaxConsecutiveAclOutTimeouts = 4;
 
-bool IsRecoverablePipeError(uint32_t win32Error) noexcept
+bool IsHardwareStallError(uint32_t win32Error) noexcept
 {
-    return win32Error == ERROR_SEM_TIMEOUT || win32Error == ERROR_GEN_FAILURE ||
-           win32Error == ERROR_IO_DEVICE || win32Error == ERROR_CRC;
+    return win32Error == ERROR_GEN_FAILURE || win32Error == ERROR_IO_DEVICE ||
+           win32Error == ERROR_CRC;
 }
 
 bool IsHciCommandSetup(const std::array<uint8_t, 8> &setup)
@@ -336,25 +336,27 @@ void RadioBridgeSession::HandleWritePipeFailure(
         pipeAddr, len);
     ServiceLog::Write(LogLevel::Warn, "radio", std::string{prefix} + FormatWin32Error(err));
 
-    if (IsRecoverablePipeError(err)) {
+    if (IsHardwareStallError(err)) {
+        // Only call WinUsb_ResetPipe on genuine USB STALL / I/O errors — NEVER on a simple
+        // ERROR_SEM_TIMEOUT (flow-control NAK), because ResetPipe resets the host USB Data Toggle
+        // while a non-halted controller stays on its previous toggle and drops every later packet.
         const uint32_t resetErr = _radio.ResetPipe(pipeAddr);
         char resetBuf[160]{};
-        std::snprintf(resetBuf, sizeof(resetBuf), "ResetPipe(0x%02X) after OUT error: ", pipeAddr);
+        std::snprintf(resetBuf, sizeof(resetBuf), "ResetPipe(0x%02X) after OUT stall: ", pipeAddr);
         ServiceLog::Write(
             resetErr == ERROR_SUCCESS ? LogLevel::Info : LogLevel::Warn, "radio",
             std::string{resetBuf} +
                 (resetErr == ERROR_SUCCESS ? "ok" : FormatWin32Error(resetErr)));
-
-        if (pipeAddr == _hciPipes.aclOutPipe && err == ERROR_SEM_TIMEOUT) {
-            const uint32_t streak = _consecutiveAclOutTimeouts.fetch_add(1) + 1;
-            if (streak >= kMaxConsecutiveAclOutTimeouts) {
-                ServiceLog::Write(
-                    LogLevel::Error, "radio",
-                    "HCI Bulk OUT pipe timed out " + std::to_string(streak) +
-                        " times consecutively despite ResetPipe; recycling radio session.");
-                MarkDeviceLost(err);
-                return;
-            }
+    }
+    else if (pipeAddr == _hciPipes.aclOutPipe && err == ERROR_SEM_TIMEOUT) {
+        const uint32_t streak = _consecutiveAclOutTimeouts.fetch_add(1) + 1;
+        if (streak >= kMaxConsecutiveAclOutTimeouts) {
+            ServiceLog::Write(
+                LogLevel::Error, "radio",
+                "HCI Bulk OUT pipe timed out " + std::to_string(streak) +
+                    " times consecutively; recycling radio session.");
+            MarkDeviceLost(err);
+            return;
         }
     }
 

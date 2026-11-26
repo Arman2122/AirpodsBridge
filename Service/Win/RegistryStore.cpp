@@ -109,6 +109,52 @@ void RegistryStore::SetStoredRadioInstance(const std::optional<std::wstring> &in
     RegCloseKey(key);
 }
 
+std::optional<std::string> RegistryStore::GetStoredAdapterName()
+{
+    HKEY key = OpenRoot(KEY_READ, false);
+    if (key == nullptr) {
+        return std::nullopt;
+    }
+    DWORD type = 0;
+    DWORD bytes = 0;
+    std::optional<std::string> out;
+    if (RegQueryValueExW(key, L"AdapterDisplayName", nullptr, &type, nullptr, &bytes) ==
+            ERROR_SUCCESS &&
+        type == REG_SZ && bytes >= sizeof(wchar_t))
+    {
+        std::wstring val(bytes / sizeof(wchar_t), L'\0');
+        if (RegQueryValueExW(
+                key, L"AdapterDisplayName", nullptr, &type, reinterpret_cast<LPBYTE>(val.data()),
+                &bytes) == ERROR_SUCCESS)
+        {
+            while (!val.empty() && val.back() == L'\0') {
+                val.pop_back();
+            }
+            if (!val.empty()) {
+                out = WideToUtf8(val);
+            }
+        }
+    }
+    RegCloseKey(key);
+    return out;
+}
+
+void RegistryStore::SetStoredAdapterName(const std::string &displayName)
+{
+    if (displayName.empty()) {
+        return;
+    }
+    HKEY key = OpenRoot(KEY_WRITE, true);
+    if (key == nullptr) {
+        return;
+    }
+    const std::wstring wide = Utf8ToWide(displayName);
+    const DWORD bytes = static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t));
+    RegSetValueExW(
+        key, L"AdapterDisplayName", 0, REG_SZ, reinterpret_cast<const BYTE *>(wide.c_str()), bytes);
+    RegCloseKey(key);
+}
+
 std::vector<std::wstring> RegistryStore::GetBoundInstances()
 {
     std::vector<std::wstring> out;
