@@ -65,6 +65,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void focusInEvent(QFocusEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
 
 private:
     enum class CircleKind {
@@ -99,6 +101,7 @@ private:
     int _hoveredCircle{-1};
     int _pressedCircle{-1};
     bool _hoveringCapsule{false};
+    bool _keyboardFocus{false};
 
     QRectF CapsuleRect() const;
     qreal ThumbWidth() const;

@@ -9,6 +9,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed optical Heart Rate monitoring requiring a manual off/on toggle on startup when AirPods
+  Pro 3 report `HRM_STATE` (`0x30`) enabled by default (`Source/Core/AirPods.h/.cpp`):
+  - `Core::AirPods::Manager` now adopts an incoming hardware `HeartRateMonitoring = true`
+    notification automatically on AAP connect, transitions status cleanly to `Starting` (or
+    `WaitingForEar` if buds are out of ear), and starts the RTBuddy optical PPG sequence after a
+    brief initial notification settle window so live BPM begins automatically.
+  - Decoupled the AAP connection lifecycle epoch (`_aapConnectionEpoch`) from `_heartRateEpoch`,
+    preserved the user's explicit off choice against periodic firmware `0x30 = 1` echoes, and
+    avoided disabling the hardware `0x30` toggle during out-of-ear pauses or app exit.
+- Fixed the active blue Listening Mode thumb overlapping the light-gray nested Adaptive pill in
+  both the popup and Settings (`Source/Gui/Widget/AppleNoiseControl.h/.cpp`):
+  - Solved `ThumbWidth()` from the exact 5-landmark spacing equation so the nested Adaptive zone
+    maintains a crisp non-overlapping gap from both Transparency and Noise Cancellation at every
+    widget width while keeping the blue thumb flush inside the Adaptive pill across `0%..100%`.
+  - Restricted the outer capsule focus outline to keyboard navigation (`Tab`/`Backtab`) so opening
+    the popup or clicking the slider no longer leaves a distracting blue border around the capsule.
 - Fixed single-ear audio static/noise paired with silence in the opposite AirPod after removing
   and reinserting the primary bud or during 2.4 GHz RF bursts (`Service/Protocol/HciProxyEngine.h/.cpp`,
   `Service/Protocol/ServiceProtocol.h`, `Service/Win/RegistryStore.cpp`, `Service/Win/WinUsbRadio.cpp`,

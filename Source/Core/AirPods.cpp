@@ -122,7 +122,7 @@ Manager::~Manager()
     _heartRateWatchdog.stop();
     _convSpeechSafetyTimer.stop();
     if (_heartRateWanted && _aapConnected && _controlTransport->IsConnected()) {
-        StopHeartRateWire();
+        StopHeartRateWire(false);
     }
     _controlTransport->SetOnPacketReceived({});
     _controlTransport->SetOnConnectionChanged({});
@@ -819,7 +819,7 @@ bool Manager::SetHeartRateMonitoring(bool enabled)
     LOG(Info, "AAP: requesting RTBuddy optical heart rate sensor '{}'.", enabled);
 
     bool connected = false;
-    bool bothInCase = false;
+    bool notWorn = false;
     PendingStateSignals pending;
     {
         std::lock_guard<std::mutex> lock{_mutex};
@@ -828,14 +828,17 @@ bool Manager::SetHeartRateMonitoring(bool enabled)
             return false;
         }
         _heartRateWanted = enabled;
+        _heartRateUserDisabled = !enabled;
+        _heartRateRetrying = false;
         _heartRateWarmupLogged = false;
         _lastLoggedBpm.reset();
         ++_heartRateEpoch;
 
         const auto st = _stateMgr.GetCurrentState();
-        bothInCase = st.has_value() && st->caseBox.isBothPodsInCase && !st->pods.left.isInEar &&
-                     !st->pods.right.isInEar;
-        _heartRatePausedOutOfEar = enabled && bothInCase;
+        const bool worn = st.has_value() && (st->pods.left.isInEar || st->pods.right.isInEar);
+        const bool bothInCase = st.has_value() && st->caseBox.isBothPodsInCase && !worn;
+        notWorn = bothInCase || (_aapEarStateReceived && !worn);
+        _heartRatePausedOutOfEar = enabled && notWorn;
 
         if (auto u1 = _stateMgr.OnAapMessage(
                 Aap::FeatureToggleNotification{
@@ -847,7 +850,7 @@ bool Manager::SetHeartRateMonitoring(bool enabled)
         }
         const HeartRateStatus nextStatus =
             !enabled ? HeartRateStatus::Off
-                     : (bothInCase ? HeartRateStatus::WaitingForEar : HeartRateStatus::Starting);
+                     : (notWorn ? HeartRateStatus::WaitingForEar : HeartRateStatus::Starting);
         if (auto u2 = _stateMgr.OnAapMessage(
                 Aap::HeartRateStatusNotification{.status = nextStatus}, _boundModel);
             u2.has_value())
@@ -859,17 +862,17 @@ bool Manager::SetHeartRateMonitoring(bool enabled)
     EmitStateSignals(pending);
 
     if (enabled) {
-        if (!bothInCase) {
+        if (!notWorn) {
             StartHeartRateCampaignLater(true);
         }
         else {
-            LOG(Info, "AAP heart rate: AirPods are in case; waiting for ear contact to start.");
+            LOG(Info, "AAP heart rate: AirPods are not in ears; waiting for ear contact to start.");
         }
     }
     else {
         QMetaObject::invokeMethod(
             this, [this] { _heartRateWatchdog.stop(); }, Qt::QueuedConnection);
-        StopHeartRateWire();
+        StopHeartRateWire(true);
     }
     return true;
 }
@@ -1205,7 +1208,7 @@ void Manager::OnControlConnectionChanged(bool connected)
     bool shouldHandshake = false;
     bool rejectStaleConnect = false;
     bool resumeHeartRate = false;
-    uint64_t epoch = 0;
+    uint64_t connEpoch = 0;
     PendingStateSignals pending;
 
     {
@@ -1214,6 +1217,8 @@ void Manager::OnControlConnectionChanged(bool connected)
         _rtBuddyParser.Reset();
         _rtBuddySeq = 0;
         _heartRateWarmupLogged = false;
+        _heartRateRetrying = false;
+        _aapEarStateReceived = false;
         _lastLoggedBpm.reset();
         _aapFeaturesEnabledSent = false;
         _allowOffSentToDevice = false;
@@ -1231,7 +1236,8 @@ void Manager::OnControlConnectionChanged(bool connected)
         _queuedNoiseMode.reset();
         ++_noiseModeInFlightEpoch;
         _lastRequestedNoiseMode.reset();
-        epoch = ++_heartRateEpoch;
+        connEpoch = ++_aapConnectionEpoch;
+        ++_heartRateEpoch;
 
         if (connected && !_deviceConnected) {
             rejectStaleConnect = true;
@@ -1267,9 +1273,9 @@ void Manager::OnControlConnectionChanged(bool connected)
         // app session and AirPods do not send a fresh Handshake ACK.
         QMetaObject::invokeMethod(
             this,
-            [this, epoch, resumeHeartRate] {
-                QTimer::singleShot(220, this, [this, epoch, resumeHeartRate] {
-                    CompleteAapPostHandshake(epoch, resumeHeartRate);
+            [this, connEpoch, resumeHeartRate] {
+                QTimer::singleShot(220, this, [this, connEpoch, resumeHeartRate] {
+                    CompleteAapPostHandshake(connEpoch, resumeHeartRate);
                 });
             },
             Qt::QueuedConnection);
@@ -1292,16 +1298,18 @@ void Manager::OnControlConnectionChanged(bool connected)
     ReconcileScannerLater();
 }
 
-void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
+void Manager::CompleteAapPostHandshake(uint64_t connEpoch, bool resumeHeartRate)
 {
+    uint64_t initialHrEpoch = 0;
     {
         std::lock_guard<std::mutex> lock{_mutex};
-        if (!_aapConnected || _heartRateEpoch != epoch || _aapFeaturesEnabledSent ||
+        if (!_aapConnected || _aapConnectionEpoch != connEpoch || _aapFeaturesEnabledSent ||
             !_controlTransport->IsConnected())
         {
             return;
         }
         _aapFeaturesEnabledSent = true;
+        initialHrEpoch = _heartRateEpoch;
     }
 
     LOG(Info, "AAP handshake acknowledged; enabling H2 features (0x4D) and notifications (0x0F).");
@@ -1309,12 +1317,13 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
 
     QMetaObject::invokeMethod(
         this,
-        [this, epoch, resumeHeartRate] {
-            QTimer::singleShot(100, this, [this, epoch] {
+        [this, connEpoch, initialHrEpoch, resumeHeartRate] {
+            QTimer::singleShot(100, this, [this, connEpoch] {
                 {
                     std::lock_guard<std::mutex> lock{_mutex};
-                    if (!_aapConnected || _heartRateEpoch != epoch ||
-                        !_controlTransport->IsConnected()) {
+                    if (!_aapConnected || _aapConnectionEpoch != connEpoch ||
+                        !_controlTransport->IsConnected())
+                    {
                         return;
                     }
                 }
@@ -1323,13 +1332,14 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
             // Proactively arm Allow "Off" Listening Mode (0x34) once per session on models that
             // gate Off behind it (AirPods Pro 2/3, AirPods 4 ANC, AirPods 5) unless disabled or
             // already reported enabled by the AirPods.
-            QTimer::singleShot(650, this, [this, epoch] {
+            QTimer::singleShot(650, this, [this, connEpoch] {
                 bool shouldArmAllowOff = false;
                 PendingStateSignals armPending;
                 {
                     std::lock_guard<std::mutex> lock{_mutex};
-                    if (!_aapConnected || _heartRateEpoch != epoch || _userDisabledAllowOff ||
-                        _allowOffSentToDevice || !_controlTransport->IsConnected())
+                    if (!_aapConnected || _aapConnectionEpoch != connEpoch ||
+                        _userDisabledAllowOff || _allowOffSentToDevice ||
+                        !_controlTransport->IsConnected())
                     {
                         return;
                     }
@@ -1364,12 +1374,13 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
             // If initial listening mode / metadata has not arrived within 1.6 s (e.g. AirPods
             // were still settling A2DP when the first 0x0F arrived), send one clean retry of 0x0F
             // so Controls populate immediately instead of waiting for the 30 s periodic dump.
-            QTimer::singleShot(1600, this, [this, epoch] {
+            QTimer::singleShot(1600, this, [this, connEpoch] {
                 bool needRetry = false;
                 {
                     std::lock_guard<std::mutex> lock{_mutex};
-                    if (!_aapConnected || _heartRateEpoch != epoch ||
-                        !_controlTransport->IsConnected()) {
+                    if (!_aapConnected || _aapConnectionEpoch != connEpoch ||
+                        !_controlTransport->IsConnected())
+                    {
                         return;
                     }
                     const auto st = _stateMgr.GetCurrentState();
@@ -1382,10 +1393,12 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
                 }
             });
             if (resumeHeartRate) {
-                QTimer::singleShot(850, this, [this, epoch] {
+                QTimer::singleShot(850, this, [this, connEpoch, initialHrEpoch] {
                     {
                         std::lock_guard<std::mutex> lock{_mutex};
-                        if (!_aapConnected || !_heartRateWanted || _heartRateEpoch != epoch) {
+                        if (!_aapConnected || !_heartRateWanted || _heartRatePausedOutOfEar ||
+                            _aapConnectionEpoch != connEpoch || _heartRateEpoch != initialHrEpoch)
+                        {
                             return;
                         }
                     }
@@ -1399,19 +1412,19 @@ void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
 void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
 {
     if (IsHandshakeAckFrame(packet)) {
-        uint64_t epoch = 0;
+        uint64_t connEpoch = 0;
         bool resumeHr = false;
         bool triggerPostHandshake = false;
         {
             std::lock_guard<std::mutex> lock{_mutex};
             if (_aapConnected && !_aapFeaturesEnabledSent) {
-                epoch = _heartRateEpoch;
+                connEpoch = _aapConnectionEpoch;
                 resumeHr = _heartRateWanted;
                 triggerPostHandshake = true;
             }
         }
         if (triggerPostHandshake) {
-            CompleteAapPostHandshake(epoch, resumeHr);
+            CompleteAapPostHandshake(connEpoch, resumeHr);
         }
         return;
     }
@@ -1545,6 +1558,10 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
     std::optional<NoiseControlMode> nextQueuedNoiseMode;
     bool pauseHrForEar = false;
     bool resumeHrForEar = false;
+    bool autoStartHr = false;
+    uint64_t autoStartConnEpoch = 0;
+    uint64_t autoStartHrEpoch = 0;
+    bool stopHrWatchdogExternal = false;
     bool retryOffMode = false;
     uint64_t retryOffEpoch = 0;
     bool retryAdaptiveMode = false;
@@ -1558,6 +1575,58 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
             return;
         }
         bool suppressNoiseEcho = false;
+        std::optional<HeartRateStatus> adoptedHrStatus;
+        if (const auto *toggleMsg = std::get_if<Aap::FeatureToggleNotification>(&message.value());
+            toggleMsg != nullptr && toggleMsg->feature == Aap::ToggleFeature::HeartRateMonitoring)
+        {
+            if (toggleMsg->enabled) {
+                if (_heartRateUserDisabled) {
+                    // User explicitly disabled Heart Rate Monitoring in this session; ignore
+                    // stale or periodic hardware 0x30 = 1 echoes so the toggle stays OFF.
+                    suppressNoiseEcho = true;
+                }
+                else if (!_heartRateWanted && _aapConnected) {
+                    // AirPods Pro 3 enable 0x30 (Heart Rate Monitoring) by default in firmware.
+                    // Adopt the hardware's ON state immediately and kick off the RTBuddy optical
+                    // PPG sequence so live BPM starts without requiring a manual off/on toggle.
+                    const auto curSt = _stateMgr.GetCurrentState();
+                    const Model model = curSt.has_value() && curSt->model != Model::Unknown
+                                            ? curSt->model
+                                            : _boundModel;
+                    if (model == Model::Unknown || CapabilitiesFor(model).supportsHeartRate) {
+                        const bool worn = curSt.has_value() &&
+                                          (curSt->pods.left.isInEar || curSt->pods.right.isInEar);
+                        const bool bothInCase =
+                            curSt.has_value() && curSt->caseBox.isBothPodsInCase && !worn;
+                        const bool notWorn = bothInCase || (_aapEarStateReceived && !worn);
+                        _heartRateWanted = true;
+                        _heartRateRetrying = false;
+                        _heartRateWarmupLogged = false;
+                        _lastLoggedBpm.reset();
+                        _heartRatePausedOutOfEar = notWorn;
+                        adoptedHrStatus =
+                            notWorn ? HeartRateStatus::WaitingForEar : HeartRateStatus::Starting;
+                        autoStartHr = !notWorn;
+                        autoStartConnEpoch = _aapConnectionEpoch;
+                        autoStartHrEpoch = _heartRateEpoch;
+                    }
+                }
+            }
+            else {
+                if (_heartRateWanted && (_heartRatePausedOutOfEar || _heartRateRetrying)) {
+                    // Suppress transient 0x30 = 0 echoes caused by out-of-ear pause or a
+                    // watchdog optical sensor reset.
+                    suppressNoiseEcho = true;
+                }
+                else if (_heartRateWanted) {
+                    _heartRateWanted = false;
+                    _heartRatePausedOutOfEar = false;
+                    _heartRateRetrying = false;
+                    ++_heartRateEpoch;
+                    stopHrWatchdogExternal = true;
+                }
+            }
+        }
         if (const auto *ncMsg = std::get_if<Aap::NoiseControlNotification>(&message.value())) {
             const auto now = std::chrono::steady_clock::now();
             if (ncMsg->mode == NoiseControlMode::Adaptive) {
@@ -1650,6 +1719,15 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
             {
                 pending = PrepareStateChangedLocked(std::move(update.value()));
             }
+            if (adoptedHrStatus.has_value()) {
+                if (auto u = _stateMgr.OnAapMessage(
+                        Aap::HeartRateStatusNotification{.status = adoptedHrStatus.value()},
+                        _boundModel);
+                    u.has_value())
+                {
+                    pending = PrepareStateChangedLocked(std::move(u.value()));
+                }
+            }
         }
 
         if (const auto *speech =
@@ -1669,6 +1747,7 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
             }
         }
         else if (std::holds_alternative<Aap::EarDetectionNotification>(message.value())) {
+            _aapEarStateReceived = true;
             const auto st = _stateMgr.GetCurrentState();
             const bool worn = st.has_value() && (st->pods.left.isInEar || st->pods.right.isInEar);
             if (!worn) {
@@ -1778,15 +1857,45 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
         ArmConversationSpeechSafetyLater(convLevelToEmit.value());
         emit ConversationAwarenessLevelChanged(convLevelToEmit.value());
     }
+    if (stopHrWatchdogExternal) {
+        QMetaObject::invokeMethod(
+            this, [this] { _heartRateWatchdog.stop(); }, Qt::QueuedConnection);
+    }
     if (pauseHrForEar) {
         LOG(Info, "AAP heart rate: AirPods removed from ears; pausing optical sensor.");
         QMetaObject::invokeMethod(
             this, [this] { _heartRateWatchdog.stop(); }, Qt::QueuedConnection);
-        StopHeartRateWire();
+        StopHeartRateWire(false);
     }
     else if (resumeHrForEar) {
         LOG(Info, "AAP heart rate: ear contact detected; resuming optical sensor.");
         StartHeartRateCampaignLater(true);
+    }
+    else if (autoStartHr) {
+        LOG(Info,
+            "AAP heart rate: AirPods reported heart rate monitoring enabled; starting optical PPG "
+            "sensor.");
+        // Wait 350 ms so the initial 0x0F burst (including EarDetectionNotification) settles
+        // before opening RTBuddy services. If buds are out of ear, EarDetectionNotification
+        // bumps `_heartRateEpoch` during this window and transitions cleanly to WaitingForEar.
+        QMetaObject::invokeMethod(
+            this,
+            [this, autoStartConnEpoch, autoStartHrEpoch] {
+                QTimer::singleShot(350, this, [this, autoStartConnEpoch, autoStartHrEpoch] {
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_heartRateWanted || _heartRatePausedOutOfEar || !_aapConnected ||
+                            _aapConnectionEpoch != autoStartConnEpoch ||
+                            _heartRateEpoch != autoStartHrEpoch ||
+                            !_controlTransport->IsConnected())
+                        {
+                            return;
+                        }
+                    }
+                    StartHeartRateCampaignLater(true);
+                });
+            },
+            Qt::QueuedConnection);
     }
 }
 
@@ -1875,8 +1984,18 @@ void Manager::RunHeartRateAttempt(uint64_t epoch, int attempt)
         }
         _controlTransport->SendPacket(req);
     });
-    QTimer::singleShot(
-        800, this, [sendIfCurrent] { sendIfCurrent(RtBuddy::BuildHrmStatePacket(true)); });
+    QTimer::singleShot(800, this, [this, epoch] {
+        {
+            std::lock_guard<std::mutex> lock{_mutex};
+            if (!_heartRateWanted || !_aapConnected || _heartRateEpoch != epoch ||
+                !_controlTransport->IsConnected())
+            {
+                return;
+            }
+            _heartRateRetrying = false;
+        }
+        _controlTransport->SendPacket(RtBuddy::BuildHrmStatePacket(true));
+    });
 
     int delayMs = 920;
     for (const uint8_t svc : services) {
@@ -1901,7 +2020,7 @@ void Manager::RunHeartRateAttempt(uint64_t epoch, int attempt)
     _heartRateWatchdog.start(13200);
 }
 
-void Manager::StopHeartRateWire()
+void Manager::StopHeartRateWire(bool disableHrmToggle)
 {
     std::vector<std::vector<uint8_t>> packets;
     {
@@ -1913,7 +2032,9 @@ void Manager::StopHeartRateWire()
             packets.push_back(
                 RtBuddy::BuildServiceReportIntervalPacket(NextRtBuddySeqLocked(), svc, 0));
         }
-        packets.push_back(RtBuddy::BuildHrmStatePacket(false));
+        if (disableHrmToggle) {
+            packets.push_back(RtBuddy::BuildHrmStatePacket(false));
+        }
     }
 
     for (const auto &pkt : packets) {
@@ -1966,14 +2087,23 @@ void Manager::OnHeartRateWatchdogTimeout()
         return;
     }
 
-    StopHeartRateWire();
     if (attempt < kMaxAttempts) {
+        {
+            std::lock_guard<std::mutex> lock{_mutex};
+            _heartRateRetrying = true;
+        }
+        StopHeartRateWire(true);
         LOG(Warn, "AAP heart rate: no locked optical sample within 12 s; retrying ({}/{}).",
             attempt + 1, kMaxAttempts);
         UpdateHeartRateStatus(HeartRateStatus::Starting);
         QTimer::singleShot(350, this, [this] { StartHeartRateCampaignLater(false); });
     }
     else {
+        {
+            std::lock_guard<std::mutex> lock{_mutex};
+            _heartRateRetrying = false;
+        }
+        StopHeartRateWire(false);
         LOG(Warn, "AAP heart rate: no optical pulse lock after {} attempts; pausing sensor.",
             kMaxAttempts);
         UpdateHeartRateStatus(HeartRateStatus::NoSignal);

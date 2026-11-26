@@ -134,8 +134,12 @@ private:
     RtBuddy::SessionParser _rtBuddyParser;
     uint8_t _rtBuddySeq{0};
     bool _heartRateWanted{false};
+    bool _heartRateUserDisabled{false};
     bool _heartRatePausedOutOfEar{false};
+    bool _heartRateRetrying{false};
     bool _heartRateWarmupLogged{false};
+    bool _aapEarStateReceived{false};
+    uint64_t _aapConnectionEpoch{0};
     uint64_t _heartRateEpoch{0};
     int _heartRateAttempt{0};
     std::chrono::steady_clock::time_point _lastHeartRateSampleTime{};
@@ -195,7 +199,7 @@ private:
     void CompleteBoundDeviceLookup(uint64_t address, std::optional<Bluetooth::Device> device);
     void HandleBoundDeviceConnectionStateChanged(Bluetooth::DeviceState state);
     void OnControlConnectionChanged(bool connected);
-    void CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate);
+    void CompleteAapPostHandshake(uint64_t connEpoch, bool resumeHeartRate);
     void DispatchNoiseControlWire(
         NoiseControlMode mode, bool supportsAllowOff, bool needAllowOffFirst,
         bool needFeaturesFirst, uint64_t inFlightEpoch);
@@ -203,7 +207,7 @@ private:
     void OnControlPacketReceived(std::span<const uint8_t> packet);
     void StartHeartRateCampaignLater(bool resetAttempts);
     void RunHeartRateAttempt(uint64_t epoch, int attempt);
-    void StopHeartRateWire();
+    void StopHeartRateWire(bool disableHrmToggle = true);
     void OnHeartRateWatchdogTimeout();
     void UpdateHeartRateStatus(HeartRateStatus status);
     void ArmConversationSpeechSafetyLater(uint8_t level);

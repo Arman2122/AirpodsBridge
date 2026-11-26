@@ -7,6 +7,7 @@
 #include <cmath>
 #include <numbers>
 
+#include <QFocusEvent>
 #include <QKeyEvent>
 #include <QLinearGradient>
 #include <QMouseEvent>
@@ -38,6 +39,9 @@ constexpr int kFullControlHeight = static_cast<int>(
     kCircleTitleGap + kCircleTitleHeight + kCircleSubHeight + 2.0);
 
 constexpr qreal kThumbInset = 3.0;
+constexpr qreal kAdaptiveZoneMinGap = 7.0;
+constexpr qreal kTransSplit = 0.125;
+constexpr qreal kAncSplit = 0.875;
 
 QColor WithAlpha(QColor c, int alpha)
 {
@@ -476,10 +480,19 @@ QRectF AppleNoiseControl::CapsuleRect() const
 qreal AppleNoiseControl::ThumbWidth() const
 {
     const auto cap = CapsuleRect();
+    const qreal innerW = std::max(0.0, cap.width() - kThumbInset * 2.0);
     const qreal innerH = cap.height() - kThumbInset * 2.0;
-    return _presentation.supportsAdaptive
-               ? std::max(innerH + 10.0, (cap.width() - kThumbInset * 2.0) / 5.0 + 4.0)
-               : std::max(innerH + 16.0, (cap.width() - kThumbInset * 2.0) / 3.0);
+    if (_presentation.supportsAdaptive) {
+        // The 5 landmarks sit at 0.00, 0.25, 0.50, 0.75, 1.00 with step S = (innerW - thumbW) / 4.
+        // The nested Adaptive pill spans [x(0.25) - thumbW/2, x(0.75) + thumbW/2], so the gap
+        // between it and the Transparency/ANC blue thumb is G = S - thumbW = (innerW - 5*thumbW)/4.
+        // Solving thumbW = (innerW - 4*G) / 5 guarantees a clean separation gap on both sides at
+        // every width (popup and Settings alike) while keeping the thumb flush inside the Adaptive
+        // pill across the entire 0..100% range.
+        const qreal zoneGap = std::max(kAdaptiveZoneMinGap, innerW * 0.025);
+        return std::max(innerH, (innerW - 4.0 * zoneGap) / 5.0);
+    }
+    return std::max(innerH + 16.0, innerW / 3.0);
 }
 
 qreal AppleNoiseControl::ThumbCenterX(qreal normalizedPos) const
@@ -567,13 +580,13 @@ void AppleNoiseControl::CommitSliderPosition(qreal normalizedPos)
     //   0.25..0.75 = Adaptive Audio (continuous 0..100% across the entire brighter inner pill)
     //   1.00       = Noise Cancellation
     _thumbVisible = true;
-    if (normalizedPos < 0.14) {
+    if (normalizedPos < kTransSplit) {
         AnimateThumbTo(0.0, true);
         if (_presentation.activeMode != NoiseControlMode::Transparency) {
             Q_EMIT NoiseControlModeRequested(NoiseControlMode::Transparency);
         }
     }
-    else if (normalizedPos > 0.86) {
+    else if (normalizedPos > kAncSplit) {
         AnimateThumbTo(1.0, true);
         if (_presentation.activeMode != NoiseControlMode::NoiseCancellation) {
             Q_EMIT NoiseControlModeRequested(NoiseControlMode::NoiseCancellation);
@@ -627,6 +640,7 @@ void AppleNoiseControl::mousePressEvent(QMouseEvent *event)
     if (!isEnabled() || event->button() != Qt::LeftButton) {
         return;
     }
+    _keyboardFocus = false;
     const QPointF pos = event->localPos();
     const QRectF capsuleHit =
         CapsuleRect().adjusted(0.0, 0.0, 0.0, kCapsuleLabelGap + kCapsuleLabelHeight);
@@ -651,6 +665,7 @@ void AppleNoiseControl::mouseReleaseEvent(QMouseEvent *event)
     if (!isEnabled() || event->button() != Qt::LeftButton) {
         return;
     }
+    _keyboardFocus = false;
     const QPointF pos = event->localPos();
 
     if (_dragging) {
@@ -773,6 +788,21 @@ void AppleNoiseControl::keyPressEvent(QKeyEvent *event)
     QWidget::keyPressEvent(event);
 }
 
+void AppleNoiseControl::focusInEvent(QFocusEvent *event)
+{
+    const auto reason = event->reason();
+    _keyboardFocus = (reason == Qt::TabFocusReason || reason == Qt::BacktabFocusReason);
+    QWidget::focusInEvent(event);
+    update();
+}
+
+void AppleNoiseControl::focusOutEvent(QFocusEvent *event)
+{
+    _keyboardFocus = false;
+    QWidget::focusOutEvent(event);
+    update();
+}
+
 void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
 {
     const auto &colours = Theme::Colours();
@@ -845,7 +875,7 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
         // omit the static center Adaptive glyph so sliding between the dotted and solid rings
         // never shows a duplicate icon behind the glass thumb (matching iOS 27).
         const bool thumbHoldsAdaptive =
-            _thumbVisible && enabled && _thumbPos > 0.14 && _thumbPos < 0.86;
+            _thumbVisible && enabled && _thumbPos >= kTransSplit && _thumbPos <= kAncSplit;
         DrawTransparencyGlyph(painter, QPointF{xTrans, cy}, iconScale, inactiveGlyph);
         DrawDottedCircleGlyph(painter, QPointF{xDot, cy}, iconScale, subtleRingGlyph);
         if (!thumbHoldsAdaptive) {
@@ -904,10 +934,10 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
         // Active white glyph centered inside the thumb
         const QColor glyphFg = neutralOffThumb ? colours.TextPrimary : colours.OnAccent;
         if (_presentation.supportsAdaptive) {
-            if (_thumbPos < 0.14) {
+            if (_thumbPos < kTransSplit) {
                 DrawTransparencyGlyph(painter, thumbRect.center(), iconScale, glyphFg);
             }
-            else if (_thumbPos > 0.86) {
+            else if (_thumbPos > kAncSplit) {
                 DrawNoiseCancellationGlyph(painter, thumbRect.center(), iconScale, glyphFg);
             }
             else {
@@ -927,8 +957,8 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
         }
     }
 
-    // 4. Focus ring
-    if (hasFocus()) {
+    // 4. Focus ring (keyboard navigation only, matching :focus-visible)
+    if (hasFocus() && _keyboardFocus) {
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen{colours.Focus, 2.0});
         painter.drawRoundedRect(cap.adjusted(1.0, 1.0, -1.0, -1.0), capR, capR);
@@ -946,7 +976,8 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
 
     if (_presentation.supportsAdaptive) {
         const qreal w = static_cast<qreal>(width());
-        const bool draggingAdaptive = _dragging && _thumbPos >= 0.14 && _thumbPos <= 0.86;
+        const bool draggingAdaptive =
+            _dragging && _thumbPos >= kTransSplit && _thumbPos <= kAncSplit;
         const bool adaptiveOn =
             draggingAdaptive || _presentation.activeMode == NoiseControlMode::Adaptive;
         QString adaptiveText = tr("Adaptive");
@@ -967,7 +998,7 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
         }
         drawLabel(
             QRectF{4.0, labelY, w * 0.34, kCapsuleLabelHeight}, Qt::AlignLeft, tr("Transparency"),
-            (_dragging && _thumbPos < 0.14) ||
+            (_dragging && _thumbPos < kTransSplit) ||
                 (!_dragging && _presentation.activeMode == NoiseControlMode::Transparency));
         drawLabel(
             QRectF{w * 0.28, labelY, w * 0.44, kCapsuleLabelHeight}, Qt::AlignHCenter, adaptiveText,
@@ -975,7 +1006,7 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
         drawLabel(
             QRectF{w * 0.56, labelY, w * 0.44 - 4.0, kCapsuleLabelHeight}, Qt::AlignRight,
             tr("Noise Cancellation"),
-            (_dragging && _thumbPos > 0.86) ||
+            (_dragging && _thumbPos > kAncSplit) ||
                 (!_dragging && _presentation.activeMode == NoiseControlMode::NoiseCancellation));
     }
     else {
