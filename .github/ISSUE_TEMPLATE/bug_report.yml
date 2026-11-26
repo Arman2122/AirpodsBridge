@@ -1,24 +1,20 @@
 name: Bug report
-description: Something does not work the way it should
+description: Report a reproducible problem with AirpodsBridge.
 title: "[Bug] "
-labels: ["bug"]
+labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a report.
-
-        Please [search the existing issues](https://github.com/Arman2122/AirpodsBridge/issues?q=is%3Aissue)
-        first — a quick check saves everyone a duplicate.
+        Check the [troubleshooting guide](https://github.com/Arman2122/AirpodsBridge/wiki/Troubleshooting)
+        and [search existing issues](https://github.com/Arman2122/AirpodsBridge/issues?q=is%3Aissue).
+        Use [private reporting](https://github.com/Arman2122/AirpodsBridge/security/advisories/new) for security vulnerabilities.
 
   - type: textarea
-    id: description
+    id: behavior
     attributes:
-      label: What happened
-      description: A clear description of the problem, and what you expected instead.
-      placeholder: |
-        Ear detection stopped pausing playback after I reconnected the buds.
-        I expected playback to pause when I removed the left bud.
+      label: Actual and expected behavior
+      description: Describe what happened and what you expected to see or hear.
     validations:
       required: true
 
@@ -26,10 +22,11 @@ body:
     id: steps
     attributes:
       label: Steps to reproduce
-      value: |
-        1.
-        2.
-        3.
+      description: Include the starting state, shortest steps, and how often it happens. If it started after an update, include the last working version if known.
+      placeholder: |
+        1. Connect the earbuds and start playback.
+        2. Take out the left earbud, then put it back in.
+        3. Playback stays paused every time.
     validations:
       required: true
 
@@ -37,64 +34,44 @@ body:
     id: version
     attributes:
       label: AirpodsBridge version
-      description: Shown in Settings → About.
-      placeholder: "1.0.0"
+      description: Find this in Settings → About. Include installer, portable ZIP, or source build.
+      placeholder: v1.1.0, installer
     validations:
       required: true
 
   - type: input
     id: windows
     attributes:
-      label: Windows version
-      description: Run `winver`, or check Settings → System → About.
-      placeholder: "Windows 11 24H2 (build 26100)"
+      label: Windows version and build
+      description: Run `winver`.
+      placeholder: Windows 11 24H2, build 26100
     validations:
       required: true
 
   - type: dropdown
-    id: device
+    id: mode
     attributes:
-      label: Device
+      label: Operating mode
       options:
-        - AirPods 1
-        - AirPods 2
-        - AirPods 3
-        - AirPods 4
-        - AirPods 4 (ANC)
-        - AirPods Pro
-        - AirPods Pro 2
-        - AirPods Pro 2 (USB-C)
-        - AirPods Pro 3
-        - AirPods Max
-        - AirPods Max (USB-C)
-        - Beats Fit Pro
-        - Powerbeats 3
-        - BeatsX
-        - BeatsSolo3
-        - Other / not listed
+        - Standard (BLE)
+        - Control Engine active
+        - Control Engine setup or restore
+        - Unsure or unable to launch
     validations:
       required: true
 
-  - type: textarea
-    id: log
+  - type: input
+    id: device
     attributes:
-      label: Trace log
+      label: Headphone and Bluetooth adapter models
+      description: Include the exact AirPods or Beats model and the adapter shown in Device Manager, if known.
+      placeholder: AirPods Pro 2 (USB-C), Intel AX210
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Logs, screenshots, or additional details
       description: |
-        Launch AirpodsBridge with `--trace`, reproduce the problem, then paste
-        `AirpodsBridge.log` from `%LOCALAPPDATA%\AirpodsBridge`.
-
-        Bluetooth issues are very hard to act on without this.
-      render: text
-
-  - type: textarea
-    id: stacktrace
-    attributes:
-      label: Stack trace
-      description: The contents of `StackTrace.log`, if the application crashed.
-      render: text
-
-  - type: textarea
-    id: context
-    attributes:
-      label: Anything else
-      description: Screenshots, recordings, or context that might matter.
+        For Bluetooth problems, follow the [trace guide](https://github.com/Arman2122/AirpodsBridge/wiki/Troubleshooting#collect-a-trace).
+        For a crash, include `StackTrace.log` if available. Before attaching anything, remove Bluetooth addresses,
+        serial numbers, usernames, and other personal information. These issues are public.

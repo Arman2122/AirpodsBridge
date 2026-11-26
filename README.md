@@ -15,7 +15,7 @@ Two-way noise control, optical heart rate, ultra-low-latency audio, and Liquid G
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)
 ![Models](https://img.shields.io/badge/supported%20models-31-34C759.svg)
 
-[Install](#install) · [Features](#features) · [Control Engine](#no-test-mode-control-engine) · [Supported Devices](#supported-devices) · [CLI & Automation](#cli--automation) · [Build](#building-from-source)
+[Install](#install) · [Features](#features) · [Wiki](https://github.com/Arman2122/AirpodsBridge/wiki) · [Supported Devices](#supported-devices) · [CLI & Automation](#cli--automation) · [Build](#building-from-source)
 
 </div>
 
@@ -225,6 +225,8 @@ Full setup instructions, presets, CMake options, and troubleshooting live in [Do
 
 ## Documentation
 
+The [AirpodsBridge Wiki](https://github.com/Arman2122/AirpodsBridge/wiki) covers setup, compatibility, the Control Engine, and troubleshooting.
+
 | Document | Contents |
 | --- | --- |
 | [Architecture](Docs/Architecture.md) | One-way module dependency graph, policy seams, and data flow from BLE/AAP to the UI. |
@@ -240,7 +242,8 @@ Full setup instructions, presets, CMake options, and troubleshooting live in [Do
 
 Bug reports, new Apple/Beats device profiles, Windows Bluetooth/audio engineering, and performance improvements are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- [Report a bug or request a feature](https://github.com/Arman2122/AirpodsBridge/issues/new/choose)
+- [Report a bug, request a feature, or suggest a device](https://github.com/Arman2122/AirpodsBridge/issues/new/choose)
+- [Ask a question or discuss an idea](https://github.com/Arman2122/AirpodsBridge/discussions)
 - [Open a pull request](https://github.com/Arman2122/AirpodsBridge/compare)
 
 ## Language

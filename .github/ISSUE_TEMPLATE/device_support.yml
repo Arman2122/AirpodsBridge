@@ -1,0 +1,54 @@
+name: AirPods or Beats model support
+description: Request support for a model missing from the compatibility table.
+title: "[Device] "
+labels: [device-support]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [device compatibility guide](https://github.com/Arman2122/AirpodsBridge/wiki/Compatibility)
+        and [existing device requests](https://github.com/Arman2122/AirpodsBridge/issues?q=is%3Aissue+label%3Adevice-support).
+        If your model is listed and a supported feature fails, use the Bug report form.
+
+  - type: input
+    id: model
+    attributes:
+      label: Exact headphone model
+      description: Use the retail name. Include the generation and case type if applicable.
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: AirpodsBridge version and Windows build
+      description: Include the Bluetooth adapter model if known.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: playback
+    attributes:
+      label: Can Windows pair and play audio through the device?
+      options:
+        - "Yes"
+        - "No"
+        - Untested
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What does AirpodsBridge show?
+      description: List what works and what is missing. Include whether the optional Control Engine was active.
+    validations:
+      required: true
+
+  - type: textarea
+    id: trace
+    attributes:
+      label: Product ID and redacted trace
+      description: |
+        Include the Bluetooth product ID if known and follow the [trace guide](https://github.com/Arman2122/AirpodsBridge/wiki/Troubleshooting#collect-a-trace).
+        Remove Bluetooth addresses, serial numbers, usernames, and other personal information before sharing.

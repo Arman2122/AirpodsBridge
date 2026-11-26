@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Question or discussion
-    url: https://github.com/Arman2122/AirpodsBridge/discussions
-    about: Ask how something works, or talk through an idea before filing a request.
-  - name: Build problem
-    url: https://github.com/Arman2122/AirpodsBridge/blob/main/Docs/Building.md#troubleshooting
-    about: Check the build troubleshooting notes first — most failures are covered there.
+  - name: Setup and troubleshooting
+    url: https://github.com/Arman2122/AirpodsBridge/wiki/Troubleshooting
+    about: Check the steps for pairing, battery, audio, and Control Engine problems.
+  - name: Ask a question
+    url: https://github.com/Arman2122/AirpodsBridge/discussions/categories/q-a
+    about: Get help with setup, configuration, or building from source.
   - name: Security vulnerability
     url: https://github.com/Arman2122/AirpodsBridge/security/advisories/new
-    about: Report privately. Please do not open a public issue for a vulnerability.
+    about: Send a private vulnerability report to the maintainers.

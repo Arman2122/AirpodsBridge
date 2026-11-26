@@ -7,6 +7,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+
+- Published the GitHub Wiki and added issue forms for bugs, feature requests, and new device support.
+
 ## [1.1.1] - 2026-11-27
 
 Stability and polish patch release resolving Windows shutdown `0x9F` BSODs during driver swaps and virtual USB/IP teardown, one-bud A2DP static/silence on bud reinsertion, Heart Rate auto-start on connect, and Listening Mode pill geometry.
