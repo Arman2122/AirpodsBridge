@@ -118,17 +118,29 @@ PRODUCTS = (
     Product("AirPods1,3", "AirPods 3", 0),
     Product("AirPods1,4", "AirPods 4", 0),
     Product("AirPods1,5", "AirPods 4 (ANC)", 0),
+    Product("AirPods3,7", "AirPods 5", 0),
+    Product("AirPods3,8", "AirPods 5 (Wireless Case)", 0),
     Product("AirPodsPro1,1", "AirPods Pro", 0),
     Product("AirPodsPro1,2", "AirPods Pro 2, including USB-C", 0),
     Product("AirPodsPro1,3", "AirPods Pro 3", 0),
     Product("AirPodsMax1,1", "AirPods Max", 15),          # Dark Grey
-    Product("AirPodsMax1,2", "AirPods Max (USB-C)", 18),  # Black
-    Product("BeatsFitPro1,1", "Beats Fit Pro", 1),        # Black
-    # Named by the application but not decoded yet: one colour each, a still only, until
-    # they are.
+    Product("AirPodsMax1,2", "AirPods Max (USB-C) & Max 2", 18),  # Black
+    Product("PowerbeatsPro2,1", "Powerbeats Pro 2", 1),   # Black + all 4 colours + 60 fps loop
+    Product("BeatsFitPro1,1", "Beats Fit Pro & Powerbeats Fit", 1),  # Black
     Product("PowerBeats3,1", "Powerbeats 3", 1, every_colour=False, animate=False),
+    Product("Powerbeats4,1", "Powerbeats", 1, every_colour=False, animate=False),
+    Product("PowerbeatsPro1,1", "Powerbeats Pro", 1, every_colour=False, animate=False),
     Product("BeatsX1,1", "BeatsX", 1, every_colour=False, animate=False),
+    Product("BeatsX2,1", "Beats Flex", 1, every_colour=False, animate=False),
     Product("BeatsSolo3,1", "Beats Solo3", 1, every_colour=False, animate=False),
+    Product("BeatsSoloPro1,1", "Beats Solo Pro", 1, every_colour=False, animate=False),
+    Product("BeatsSolo4,1", "Beats Solo 4", 0, every_colour=False, animate=False),
+    Product("BeatsSoloBuds1,1", "Beats Solo Buds", 1, every_colour=False, animate=False),
+    Product("BeatsStudio3,2", "Beats Studio3", 1, every_colour=False, animate=False),
+    Product("BeatsStudioPro1,1", "Beats Studio Pro", 1, every_colour=False, animate=False),
+    Product("BeatsStudioBuds1,1", "Beats Studio Buds", 1, every_colour=False, animate=False),
+    Product("BeatsStudioBuds1,2", "Beats Studio Buds +", 0, every_colour=False, animate=False),
+    Product("Beats3601,1", "Beats 360", 1, every_colour=False, animate=False),
 )
 
 
@@ -479,23 +491,30 @@ class Converted:
     alpha_mode: str       # "premultiplied" or "straight", as the colour layer was stored
 
 
-def _is_premultiplied(rgb, alpha) -> bool:
-    """Whether the colour layer is premultiplied by the alpha.
+def _detect_alpha_mode(rgb, alpha, bg) -> str:
+    """Detect how the colour layer was stored against its alpha channel.
 
-    Apple's bundles differ: the AirPods loops store colour scaled by alpha, so a half-covered
-    edge pixel is half as bright as the interior; the Beats loops store the colour straight.
-    Undoing a premultiplication that was never applied burns the edges white, so it is
-    measured rather than assumed: edge pixels are un-premultiplied and compared with the
-    interior. A straight layer comes out far brighter than the interior, a premultiplied one
-    level with it.
+    Apple's bundles use three conventions:
+      - `premultiplied`: colour scaled by alpha over a black matte (classic AirPods loops)
+      - `premultiplied-white`: colour blended over a white matte (`C = C_true * a + 255 * (1 - a)`,
+        used by newer AirPods 5 / 2026 SharingDeviceAssets bundles)
+      - `straight`: un-premultiplied colour (Beats loops)
     """
     luminance = rgb.mean(axis=2)
     edge = (alpha > 40) & (alpha < 120)
     inside = alpha == 255
+    if bg.min() > 230.0:
+        if not edge.any() or not inside.any():
+            return "premultiplied-white"
+        unmatted = 255.0 - (255.0 - luminance[edge]) * 255.0 / alpha[edge]
+        if (unmatted < -16.0).mean() < 0.05 and luminance[edge].mean() >= luminance[inside].mean():
+            return "premultiplied-white"
+        return "straight"
+
     if not edge.any() or not inside.any():
-        return True
+        return "premultiplied"
     unpremultiplied_edge = (luminance[edge] * 255.0 / alpha[edge]).mean()
-    return unpremultiplied_edge < 1.5 * max(1.0, luminance[inside].mean())
+    return "premultiplied" if unpremultiplied_edge < 1.5 * max(1.0, luminance[inside].mean()) else "straight"
 
 
 def convert_movie(movie: Path, work: Path) -> Converted:
@@ -541,26 +560,33 @@ def convert_movie(movie: Path, work: Path) -> Converted:
     base_frames = _frames(_decoder(base_path, "rgb24"), width * height * 3)
     alpha_frames = _frames(_decoder(alpha_path, "gray"), width * height)
     index = 0
-    premultiplied = None
+    alpha_mode = None
+    bg = None
     misaligned = 0
     checked = 0
     for rgb_bytes, alpha_bytes in zip(base_frames, alpha_frames):
         if index % step == 0:
             rgb = np.frombuffer(rgb_bytes, np.uint8).reshape(height, width, 3)[box[1]:box[3], box[0]:box[2]].astype(np.float32)
             alpha = np.frombuffer(alpha_bytes, np.uint8).reshape(height, width)[box[1]:box[3], box[0]:box[2]]
-            if premultiplied is None:
-                premultiplied = _is_premultiplied(rgb, alpha)
-            if index % (step * 15) == 0:
-                # The two layers are decoded separately. Colour well outside the alpha means
-                # the frames drifted apart, which would show as ghosting on every loop. A
-                # little bleeds past the edge by design, so it is judged against the content.
+            if alpha_mode is None:
+                empty = alpha == 0
+                bg = np.median(rgb[empty], axis=0) if empty.any() else np.zeros(3, dtype=np.float32)
+                alpha_mode = _detect_alpha_mode(rgb, alpha, bg)
+            if alpha_mode != "straight" and index % (step * 15) == 0:
+                # The two layers are decoded separately. In premultiplied streams, colour well
+                # outside the alpha matte means the frames drifted apart, which would show as
+                # ghosting on every loop. Straight streams may carry an unmasked backdrop where
+                # alpha == 0.
                 checked += 1
-                stray = np.count_nonzero((rgb.max(axis=2) > 24) & (alpha == 0))
+                stray = np.count_nonzero((np.abs(rgb - bg).max(axis=2) > 24) & (alpha == 0))
                 if stray > 0.02 * max(1, np.count_nonzero(alpha)):
                     misaligned += 1
-            if premultiplied:
+            if alpha_mode == "premultiplied":
                 factor = np.where(alpha > 0, 255.0 / np.maximum(alpha, 1), 0.0)[..., None]
                 rgb = np.clip(rgb * factor, 0, 255)
+            elif alpha_mode == "premultiplied-white":
+                factor = np.where(alpha > 0, 255.0 / np.maximum(alpha, 1), 0.0)[..., None]
+                rgb = np.where(alpha[..., None] > 0, np.clip(255.0 - (255.0 - rgb) * factor, 0, 255), 0.0)
             rgba = np.dstack([rgb, alpha]).astype(np.uint8)
             image = Image.fromarray(rgba, "RGBA").resize(target, Image.LANCZOS)
             frames.append(image)
@@ -569,7 +595,7 @@ def convert_movie(movie: Path, work: Path) -> Converted:
         raise RuntimeError(f"{movie.name}: colour layer has {index} frames, alpha layer {total}")
     if misaligned:
         raise RuntimeError(f"{movie.name}: colour and alpha layers disagree on {misaligned} of {checked} checked frames")
-    return Converted(frames, movie.name, split.fps, "premultiplied" if premultiplied else "straight")
+    return Converted(frames, movie.name, split.fps, alpha_mode)
 
 
 def convert_variant(bundle: Path, out_dir: Path, animate: bool, work: Path) -> dict:

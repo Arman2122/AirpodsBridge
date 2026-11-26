@@ -11,6 +11,10 @@
         <file>AirPods1_4/CL_0/loop.webp</file>
         <file>AirPods1_5/CL_0/still.png</file>
         <file>AirPods1_5/CL_0/loop.webp</file>
+        <file>AirPods3_7/CL_0/still.png</file>
+        <file>AirPods3_7/CL_0/loop.webp</file>
+        <file>AirPods3_8/CL_0/still.png</file>
+        <file>AirPods3_8/CL_0/loop.webp</file>
         <file>AirPodsPro1_1/CL_0/still.png</file>
         <file>AirPodsPro1_1/CL_0/loop.webp</file>
         <file>AirPodsPro1_2/CL_0/still.png</file>
@@ -29,6 +33,11 @@
         <file>AirPodsMax1_2/CL_20/still.png</file>
         <file>AirPodsMax1_2/CL_21/still.png</file>
         <file>AirPodsMax1_2/CL_22/still.png</file>
+        <file>PowerbeatsPro2_1/CL_1/still.png</file>
+        <file>PowerbeatsPro2_1/CL_1/loop.webp</file>
+        <file>PowerbeatsPro2_1/CL_2/still.png</file>
+        <file>PowerbeatsPro2_1/CL_3/still.png</file>
+        <file>PowerbeatsPro2_1/CL_4/still.png</file>
         <file>BeatsFitPro1_1/CL_0/still.png</file>
         <file>BeatsFitPro1_1/CL_1/still.png</file>
         <file>BeatsFitPro1_1/CL_1/loop.webp</file>
@@ -45,7 +54,18 @@
         <file>BeatsFitPro1_1/CL_12/still.png</file>
         <file>BeatsFitPro1_1/CL_13/still.png</file>
         <file>PowerBeats3_1/CL_1/still.png</file>
+        <file>Powerbeats4_1/CL_1/still.png</file>
+        <file>PowerbeatsPro1_1/CL_1/still.png</file>
         <file>BeatsX1_1/CL_1/still.png</file>
+        <file>BeatsX2_1/CL_1/still.png</file>
         <file>BeatsSolo3_1/CL_1/still.png</file>
+        <file>BeatsSoloPro1_1/CL_1/still.png</file>
+        <file>BeatsSolo4_1/CL_0/still.png</file>
+        <file>BeatsSoloBuds1_1/CL_1/still.png</file>
+        <file>BeatsStudio3_2/CL_1/still.png</file>
+        <file>BeatsStudioPro1_1/CL_1/still.png</file>
+        <file>BeatsStudioBuds1_1/CL_1/still.png</file>
+        <file>BeatsStudioBuds1_2/CL_0/still.png</file>
+        <file>Beats3601_1/CL_1/still.png</file>
     </qresource>
 </RCC>

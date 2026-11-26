@@ -1,7 +1,7 @@
 {
   "generator": "Tools/apple_device_assets.py",
   "asset": "com.apple.MobileAsset.SharingDeviceAssets",
-  "build": "10M11512",
+  "build": "10M14316",
   "products": {
     "AirPods1,1": {
       "name": "AirPods 1",
@@ -123,6 +123,56 @@
           "frames": 360,
           "anchors": [
             0.204,
+            0.765
+          ]
+        }
+      }
+    },
+    "AirPods3,7": {
+      "name": "AirPods 5",
+      "default": 0,
+      "mastered": "14316",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied-white",
+          "still": "AirPods3_7/CL_0/still.png",
+          "size": [
+            480,
+            209
+          ],
+          "loop": "AirPods3_7/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.203,
+            0.765
+          ]
+        }
+      }
+    },
+    "AirPods3,8": {
+      "name": "AirPods 5 (Wireless Case)",
+      "default": 0,
+      "mastered": "14316",
+      "variants": {
+        "0": {
+          "name": "White",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied-white",
+          "still": "AirPods3_8/CL_0/still.png",
+          "size": [
+            480,
+            209
+          ],
+          "loop": "AirPods3_8/CL_0/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.203,
             0.765
           ]
         }
@@ -359,6 +409,76 @@
           ],
           "anchors": [
             0.497
+          ]
+        }
+      }
+    },
+    "PowerbeatsPro2,1": {
+      "name": "Powerbeats Pro 2",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "PowerbeatsPro2_1/CL_1/still.png",
+          "size": [
+            480,
+            142
+          ],
+          "loop": "PowerbeatsPro2_1/CL_1/loop.webp",
+          "fps": 60,
+          "frames": 360,
+          "anchors": [
+            0.197,
+            0.741
+          ]
+        },
+        "2": {
+          "name": "Tan",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "PowerbeatsPro2_1/CL_2/still.png",
+          "size": [
+            480,
+            142
+          ],
+          "anchors": [
+            0.197,
+            0.741
+          ]
+        },
+        "3": {
+          "name": "Orange",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "PowerbeatsPro2_1/CL_3/still.png",
+          "size": [
+            480,
+            142
+          ],
+          "anchors": [
+            0.197,
+            0.741
+          ]
+        },
+        "4": {
+          "name": "Purple",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "straight",
+          "still": "PowerbeatsPro2_1/CL_4/still.png",
+          "size": [
+            480,
+            142
+          ],
+          "anchors": [
+            0.197,
+            0.741
           ]
         }
       }
@@ -604,6 +724,49 @@
         }
       }
     },
+    "Powerbeats4,1": {
+      "name": "Powerbeats",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop.mov",
+          "alpha": "straight",
+          "still": "Powerbeats4_1/CL_1/still.png",
+          "size": [
+            236,
+            212
+          ],
+          "anchors": [
+            0.449
+          ]
+        }
+      }
+    },
+    "PowerbeatsPro1,1": {
+      "name": "Powerbeats Pro",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "PowerbeatsPro1_1/CL_1/still.png",
+          "size": [
+            480,
+            161
+          ],
+          "anchors": [
+            0.194,
+            0.738
+          ]
+        }
+      }
+    },
     "BeatsX1,1": {
       "name": "BeatsX",
       "default": 1,
@@ -625,6 +788,27 @@
         }
       }
     },
+    "BeatsX2,1": {
+      "name": "Beats Flex",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop.mov",
+          "alpha": "straight",
+          "still": "BeatsX2_1/CL_1/still.png",
+          "size": [
+            232,
+            212
+          ],
+          "anchors": [
+            0.496
+          ]
+        }
+      }
+    },
     "BeatsSolo3,1": {
       "name": "Beats Solo3",
       "default": 1,
@@ -642,6 +826,177 @@
           ],
           "anchors": [
             0.508
+          ]
+        }
+      }
+    },
+    "BeatsSoloPro1,1": {
+      "name": "Beats Solo Pro",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsSoloPro1_1/CL_1/still.png",
+          "size": [
+            186,
+            212
+          ],
+          "anchors": [
+            0.503
+          ]
+        }
+      }
+    },
+    "BeatsSolo4,1": {
+      "name": "Beats Solo 4",
+      "default": 0,
+      "mastered": "14316",
+      "variants": {
+        "0": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsSolo4_1/CL_0/still.png",
+          "size": [
+            192,
+            212
+          ],
+          "anchors": [
+            0.497
+          ]
+        }
+      }
+    },
+    "BeatsSoloBuds1,1": {
+      "name": "Beats Solo Buds",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsSoloBuds1_1/CL_1/still.png",
+          "size": [
+            480,
+            175
+          ],
+          "anchors": [
+            0.259,
+            0.739
+          ]
+        }
+      }
+    },
+    "BeatsStudio3,2": {
+      "name": "Beats Studio3",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsStudio3_2/CL_1/still.png",
+          "size": [
+            203,
+            212
+          ],
+          "anchors": [
+            0.493
+          ]
+        }
+      }
+    },
+    "BeatsStudioPro1,1": {
+      "name": "Beats Studio Pro",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_connect-loop.mov",
+          "alpha": "straight",
+          "still": "BeatsStudioPro1_1/CL_1/still.png",
+          "size": [
+            203,
+            212
+          ],
+          "anchors": [
+            0.498
+          ]
+        }
+      }
+    },
+    "BeatsStudioBuds1,1": {
+      "name": "Beats Studio Buds",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsStudioBuds1_1/CL_1/still.png",
+          "size": [
+            480,
+            199
+          ],
+          "anchors": [
+            0.232,
+            0.713
+          ]
+        }
+      }
+    },
+    "BeatsStudioBuds1,2": {
+      "name": "Beats Studio Buds +",
+      "default": 0,
+      "mastered": "14316",
+      "variants": {
+        "0": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop-charged.mov",
+          "alpha": "premultiplied",
+          "still": "BeatsStudioBuds1_2/CL_0/still.png",
+          "size": [
+            480,
+            199
+          ],
+          "anchors": [
+            0.233,
+            0.715
+          ]
+        }
+      }
+    },
+    "Beats3601,1": {
+      "name": "Beats 360",
+      "default": 1,
+      "mastered": "14316",
+      "variants": {
+        "1": {
+          "name": "Black",
+          "mastered": "14316",
+          "from": "ProxCard_loop.mov",
+          "alpha": "straight",
+          "still": "Beats3601_1/CL_1/still.png",
+          "size": [
+            183,
+            212
+          ],
+          "anchors": [
+            0.497
           ]
         }
       }
