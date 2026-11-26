@@ -16,8 +16,20 @@ namespace Core::AirPods {
 class Manager;
 }
 
+namespace Core::AudioControl {
+class Service;
+}
+
 namespace Core::AutoStart {
 class Service;
+}
+
+namespace Core::GlobalHotkeys {
+class Manager;
+}
+
+namespace Core::Ipc {
+class Server;
 }
 
 namespace Core::QuickConnect {
@@ -25,8 +37,13 @@ class Backend;
 class Controller;
 } // namespace Core::QuickConnect
 
+namespace Core::SystemEvents {
+class Watcher;
+}
+
 namespace Core::Update {
 class AsyncChecker;
+struct CheckResult;
 struct ReleaseInfo;
 } // namespace Core::Update
 
@@ -80,15 +97,21 @@ private:
     std::unique_ptr<Gui::MainWindow> _mainWindow;
     std::unique_ptr<Gui::DownloadWindow> _downloadWindow;
     std::unique_ptr<Core::AirPods::Manager> _airPodsManager;
+    std::unique_ptr<Core::AudioControl::Service> _audioControl;
     std::unique_ptr<Core::Automation::Engine> _automation;
     std::unique_ptr<Core::AutoStart::Service> _autoStartService;
     std::unique_ptr<Core::Update::AsyncChecker> _updateChecker;
+    std::unique_ptr<Core::GlobalHotkeys::Manager> _hotkeys;
+    std::unique_ptr<Core::Ipc::Server> _ipcServer;
+    std::unique_ptr<Core::SystemEvents::Watcher> _systemEvents;
     // Declared last so that it is destroyed first: a watcher must never outlive the members
     // it captures.
     std::vector<Core::Settings::Subscription> _settingsWatches;
     bool _showPopupOnLidOpen{true};
+    bool _nativeToastNotifications{true};
     bool _updateCheckEnabled{false};
     bool _trayWelcomePending{false};
+    uint64_t _codecReconnectEpoch{0};
 
     void InitSettings(Core::Settings::LoadResult loadResult);
     void FirstTimeUse();
@@ -98,14 +121,20 @@ private:
     void ConnectGuiComponents();
     void WireSettings();
 
+    QByteArray HandleIpcRequest(const QByteArray &requestJson);
+    QString BuildStatusJson() const;
+
     void SetUpdateCheckEnabled(bool enable);
     void OnUpdateAvailable(const Core::Update::ReleaseInfo &releaseInfo, bool silent);
+    void OnManualUpdateCheckCompleted(const Core::Update::CheckResult &result);
 
     // Core::Automation::Effects
     void PlayMedia() override;
     void PauseMedia() override;
     void Notify(const QString &title, const QString &text) override;
     void ConnectDevice() override;
+    void SwitchAudioOutputToAirPods() override;
+    void RestorePreviousAudioOutput() override;
 };
 
 #define ApbApp (dynamic_cast<ApbApplication *>(QCoreApplication::instance()))

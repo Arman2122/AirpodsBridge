@@ -47,6 +47,14 @@ bool ApplyRoundedCorners(QWindow *window);
 //
 bool ApplyDarkTitleBar(QWindow *window, bool dark);
 
+enum class BackdropStyle { None, Mica, Acrylic };
+
+//
+// Ask Windows 11 (22621+) DWM for a system backdrop material (Mica / Transient Acrylic)
+// via `DWMWA_SYSTEMBACKDROP_TYPE`. Safely returns false on Windows 10 and earlier.
+//
+bool ApplyBackdrop(QWindow *window, BackdropStyle style);
+
 //
 // Whether the user wants animations at all.
 //

@@ -14,11 +14,16 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.Control.h>
 
-#include <mutex>
-#include <string>
-#include <vector>
-#include <memory>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "Source/Core/GlobalMedia_abstract.h"
 #include "Source/Support/OS/Windows.h"
@@ -56,14 +61,32 @@ class Controller final : public Helper::Singleton<Controller>, public Details::C
 {
 protected:
     Controller() = default;
+    ~Controller() override;
     friend Helper::Singleton<Controller>;
 
 public:
     void Play() override;
     void Pause() override;
+    void Shutdown();
 
 private:
-    std::mutex _mutex;
+    using Clock = std::chrono::steady_clock;
+    // Do not auto-resume media that was paused more than 30 minutes ago.
+    static constexpr std::chrono::minutes kResumeExpiry{30};
+
+    std::mutex _queueMutex;
+    std::condition_variable _queueCv;
+    std::deque<Details::ActionId> _pendingActions;
+    bool _shuttingDown{false};
+    std::jthread _worker;
+
+    // Owned exclusively by `_worker` (MTA apartment).
     std::vector<std::unique_ptr<Details::MediaProgramAbstract>> _pausedPrograms;
+    std::optional<Clock::time_point> _pausedAt;
+
+    void EnsureWorkerStartedLocked();
+    void WorkerLoop(std::stop_token stopToken);
+    void ExecutePlay();
+    void ExecutePause();
 };
 } // namespace Core::GlobalMedia

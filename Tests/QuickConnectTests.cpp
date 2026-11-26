@@ -30,6 +30,7 @@ public:
     Controller *controller{};
     std::atomic<int> listCalls{};
     std::atomic<int> reconnectCalls{};
+    std::atomic<int> disconnectCalls{};
     std::atomic<int> setControllerCalls{};
     std::atomic<int> stopObservingCalls{};
 
@@ -48,6 +49,12 @@ public:
     bool RequestReconnect(const QString &id, std::stop_token) override
     {
         ++reconnectCalls;
+        return id == "{A}";
+    }
+
+    bool RequestDisconnect(const QString &id, std::stop_token) override
+    {
+        ++disconnectCalls;
         return id == "{A}";
     }
 
@@ -125,6 +132,8 @@ private slots:
     void completionStopsBackendObservation();
     void controllerDetachesBackendOnDestruction();
     void automaticRequestIgnoresTheTrayClickSwitch();
+    void disconnectAndToggleManageConnectionState();
+    void deviceMatchingNormalizesCaseAndBraces();
 
     // Threading
     void deviceRefreshDoesNotBlockTheGuiThread();
@@ -188,6 +197,49 @@ void QuickConnectTests::automaticRequestIgnoresTheTrayClickSwitch()
     // A second automatic request while one is in flight is silent.
     QCOMPARE(controller.RequestAutomatic(), Outcome::RequestStarted);
     QCOMPARE(spy.count(), 1);
+}
+
+void QuickConnectTests::disconnectAndToggleManageConnectionState()
+{
+    auto backend = std::make_shared<FakeBackend>();
+    backend->devices = {{"{A}", "AirPods", true}};
+    Controller controller{backend, kTestResolveTimeout};
+    QSignalSpy spy{&controller, &Controller::OutcomeChanged};
+    controller.SetDeviceId("{A}");
+
+    // Toggle on a connected device requests disconnect even when single-click tray switch is off.
+    QCOMPARE(controller.RequestToggle(), Outcome::RequestStarted);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 2'000);
+    QCOMPARE(spy.at(0).at(0).value<Outcome>(), Outcome::Disconnecting);
+    QCOMPARE(backend->disconnectCalls.load(), 1);
+
+    spy.clear();
+    QCOMPARE(controller.OnEndpointStateChanged("{A}", false), Outcome::Disconnected);
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).value<Outcome>(), Outcome::Disconnected);
+
+    // Explicit disconnect on an already disconnected device reports AlreadyDisconnected.
+    backend->devices = {{"{A}", "AirPods", false}};
+    spy.clear();
+    QCOMPARE(controller.RequestDisconnect(), Outcome::Disconnecting);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 2'000);
+    QCOMPARE(spy.at(0).at(0).value<Outcome>(), Outcome::AlreadyDisconnected);
+}
+
+void QuickConnectTests::deviceMatchingNormalizesCaseAndBraces()
+{
+    auto backend = std::make_shared<FakeBackend>();
+    backend->devices = {{"{A}", "AirPods", false}};
+    Controller controller{backend, kTestResolveTimeout};
+    QSignalSpy spy{&controller, &Controller::OutcomeChanged};
+    controller.SetEnabled(true);
+    // Stored without braces and lowercase must still match `{A}`.
+    controller.SetDeviceId("a");
+
+    QCOMPARE(controller.Request(), Outcome::RequestStarted);
+    QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 2'000);
+    QCOMPARE(spy.at(0).at(0).value<Outcome>(), Outcome::RequestStarted);
+    QCOMPARE(backend->reconnectCalls.load(), 1);
 }
 
 // "Nothing configured" and "the configured device is not around" are different problems and the

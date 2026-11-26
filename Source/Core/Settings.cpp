@@ -96,7 +96,9 @@ public:
             return LoadResult::NoAbiField;
         }
         else {
-            if (abi_version != kFieldsAbiVersion) {
+            if (abi_version > kFieldsAbiVersion ||
+                (abi_version < kFieldsAbiVersion && !MigrateRepository(abi_version)))
+            {
                 LOG(Warn, "The settings abi version is incompatible. Local: '{}', Expect: '{}'",
                     abi_version, kFieldsAbiVersion);
                 return LoadResult::AbiIncompatible;
@@ -186,6 +188,14 @@ private:
     std::mutex _watchMutex;
     std::vector<std::pair<uint64_t, Impl::FieldWatcher>> _watchers;
     uint64_t _nextWatchId{1};
+
+    // Forward-only schema migration hook so future `kFieldsAbiVersion` bumps preserve user
+    // preferences and device bindings instead of forcing a full reset.
+    bool MigrateRepository(uint32_t fromAbi)
+    {
+        Q_UNUSED(fromAbi);
+        return false;
+    }
 
     void SaveWithoutLock()
     {

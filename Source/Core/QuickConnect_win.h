@@ -11,6 +11,8 @@
 #include "Source/Support/OS/Windows.h"
 
 #include <atomic>
+#include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -28,7 +30,9 @@ public:
     void SetController(Controller *controller) override;
     std::vector<Device> ListDevices(std::stop_token stopToken) override;
     bool RequestReconnect(const QString &id, std::stop_token stopToken) override;
+    bool RequestDisconnect(const QString &id, std::stop_token stopToken) override;
     void StopObserving() override;
+    void InvalidateCache() override;
 
     ULONG STDMETHODCALLTYPE AddRef() override;
     ULONG STDMETHODCALLTYPE Release() override;
@@ -59,10 +63,14 @@ private:
     Controller *_controller{};
     std::atomic<ULONG> _refCount{1};
     std::mutex _controllerMutex;
+    std::mutex _pairedCacheMutex;
+    std::map<QString, Device> _pairedCache;
+    std::chrono::steady_clock::time_point _pairedCacheUpdated{};
     bool _comInitialized{};
 
     void RegisterNotifications();
     void UnregisterNotifications();
+    bool SendContainerProperty(const QString &id, ULONG propertyId, std::stop_token stopToken);
     void QueueEndpointState(const QString &containerId, bool connected);
 };
 

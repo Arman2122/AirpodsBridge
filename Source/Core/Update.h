@@ -3,8 +3,13 @@
 
 #pragma once
 
-#include <string>
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <thread>
 
 #include <QString>
 #include <QVersionNumber>
@@ -16,6 +21,12 @@ namespace Core::Update {
 using namespace std::chrono_literals;
 
 using FnProgress = std::function<bool(size_t downloaded, size_t total)>;
+
+enum class CheckStatus : uint32_t {
+    UpToDate,
+    UpdateAvailable,
+    Failed,
+};
 
 struct ReleaseInfo {
     bool CanAutoUpdate() const;
@@ -31,11 +42,17 @@ struct ReleaseInfo {
     bool isPreRelease{false};
 };
 
+struct CheckResult {
+    CheckStatus status{CheckStatus::Failed};
+    std::optional<ReleaseInfo> release;
+};
+
 namespace Details {
 
 std::optional<ReleaseInfo> ParseSingleReleaseResponse(const std::string &text);
 std::optional<ReleaseInfo> ParseMultipleReleasesResponseFirst(const std::string &text);
 bool VerifyFileSha256(const QString &filePath, const QString &expectedSha256);
+QString SanitizeAssetFileName(const QString &fileName);
 
 } // namespace Details
 
@@ -43,6 +60,7 @@ QVersionNumber ToVersionNumber(QString str);
 
 QVersionNumber GetLocalVersion();
 
+CheckResult CheckForUpdate(bool ignoreSkippedVersion = false);
 std::optional<ReleaseInfo> FetchUpdateRelease();
 bool DownloadInstall(const ReleaseInfo &info, const FnProgress &progressCallback);
 
@@ -51,6 +69,7 @@ class AsyncChecker
 public:
     using FnCallback =
         std::function<void(const Core::Update::ReleaseInfo &releaseInfo, bool silent)>;
+    using FnManualCallback = std::function<void(const CheckResult &result)>;
 
     AsyncChecker(FnCallback callback);
     ~AsyncChecker();
@@ -58,12 +77,20 @@ public:
     void Start();
     void Stop();
 
+    // One-shot manual check triggered from Settings -> About. Ignores `skipped_version`
+    // and reports UpToDate / UpdateAvailable / Failed explicitly.
+    void CheckNow(FnManualCallback onFinished);
+
 private:
-    constexpr static auto kInterval = 1h;
+    // Poll every 6 hours with ETag conditional requests so unchanged checks return 304
+    // and do not count against GitHub's unauthenticated rate limit.
+    constexpr static auto kInterval = 6h;
 
     FnCallback _callback;
     Helper::Timer _timer;
     bool _isFirst = true;
+    std::atomic<bool> _manualRunning{false};
+    std::jthread _manualThread;
 
     void Checker();
 };

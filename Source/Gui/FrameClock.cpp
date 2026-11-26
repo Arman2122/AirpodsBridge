@@ -54,8 +54,9 @@ private:
 
 FrameClock::FrameClock(QObject *parent) : QObject{parent}, _driver{std::make_unique<Driver>(*this)}
 {
+    _state->owner = this;
     _driver->install();
-    _thread = std::thread{[this] { Run(); }};
+    _thread = std::thread{[state = _state] { Run(state); }};
     g_instance = this;
 }
 
@@ -64,15 +65,21 @@ FrameClock::~FrameClock()
     g_instance = nullptr;
     _driver->uninstall();
 
-    _quit = true;
-    _wake.notify_all();
+    {
+        std::lock_guard<std::mutex> lock{_state->mutex};
+        _state->owner = nullptr;
+        _state->quit = true;
+    }
+    _state->wake.notify_all();
+
     // Bounded: a worker stuck waiting on a display that will never blank again must not
-    // hold the process at exit.
+    // hold the process at exit. Because all state is owned via `_state`, detaching cannot
+    // access destroyed `FrameClock` members.
     const auto deadline = std::chrono::steady_clock::now() + kExitGrace;
-    while (!_exited && std::chrono::steady_clock::now() < deadline) {
+    while (!_state->exited.load() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds{2});
     }
-    if (_exited) {
+    if (_state->exited.load()) {
         _thread.join();
     }
     else {
@@ -88,21 +95,21 @@ FrameClock *FrameClock::Instance()
 
 void FrameClock::Retain()
 {
-    if (_holders.fetch_add(1) != 0) {
+    if (_state->holders.fetch_add(1) != 0) {
         return;
     }
     // The first holder starts a run: decide which display it is on, then wake the worker.
     {
-        const std::lock_guard<std::mutex> lock{_mutex};
-        _target = PickTarget();
+        const std::lock_guard<std::mutex> lock{_state->mutex};
+        _state->target = PickTarget();
     }
-    _wake.notify_one();
+    _state->wake.notify_one();
 }
 
 void FrameClock::Release()
 {
     // The worker sees the count reach zero after its next frame and goes back to sleep.
-    _holders.fetch_sub(1);
+    _state->holders.fetch_sub(1);
 }
 
 FrameClock::Target FrameClock::PickTarget()
@@ -126,7 +133,7 @@ FrameClock::Target FrameClock::PickTarget()
     return target;
 }
 
-void FrameClock::Run()
+void FrameClock::Run(std::shared_ptr<SharedState> state)
 {
     QString lastDisplay;
     Core::DisplayTiming::Source lastSource = Core::DisplayTiming::Source::Timer;
@@ -135,12 +142,12 @@ void FrameClock::Run()
     while (true) {
         Target target;
         {
-            std::unique_lock<std::mutex> lock{_mutex};
-            _wake.wait(lock, [this] { return _holders.load() > 0 || _quit.load(); });
-            if (_quit) {
+            std::unique_lock<std::mutex> lock{state->mutex};
+            state->wake.wait(lock, [&] { return state->holders.load() > 0 || state->quit.load(); });
+            if (state->quit.load()) {
                 break;
             }
-            target = _target;
+            target = state->target;
         }
 
         Core::DisplayTiming::FrameWaiter waiter{target.displayName, target.refreshRate};
@@ -152,22 +159,30 @@ void FrameClock::Run()
             lastSource = waiter.GetSource();
         }
 
-        while (_holders.load() > 0 && !_quit.load()) {
+        while (state->holders.load() > 0 && !state->quit.load()) {
             waiter.WaitForNextFrame();
             // One frame in flight at a time: if the GUI thread has not drawn the last
             // one yet, this one merges into it rather than queueing behind it.
-            if (!_pending.exchange(true)) {
-                QMetaObject::invokeMethod(this, [this] { OnFrame(); }, Qt::QueuedConnection);
+            if (!state->pending.exchange(true)) {
+                std::lock_guard<std::mutex> lock{state->mutex};
+                if (state->owner != nullptr && !state->quit.load()) {
+                    QMetaObject::invokeMethod(
+                        state->owner, [owner = state->owner] { owner->OnFrame(); },
+                        Qt::QueuedConnection);
+                }
+                else {
+                    state->pending = false;
+                }
             }
         }
     }
 
-    _exited = true;
+    state->exited = true;
 }
 
 void FrameClock::OnFrame()
 {
-    _pending = false;
+    _state->pending = false;
     if (_driver->isRunning()) {
         _driver->advance();
     }

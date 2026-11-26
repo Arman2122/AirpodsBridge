@@ -130,6 +130,14 @@ int main(int argc, char *argv[])
         }
 
         window.Available();
+        window.Bind();
+        window.SetBoundDevice(Core::AirPods::Model::AirPods_Pro_3, QStringLiteral("AirPods Pro 3"));
+        window.SetQuickConnectAvailable(true);
+        if (!Grab(window, output, "Disconnected_Connect", look.suffix)) {
+            return 1;
+        }
+        window.SetQuickConnectAvailable(false);
+
         using Core::AirPods::Model;
         for (uint32_t i = 1; i < Helper::ToUnderlying(Model::_Max); ++i) {
             const auto model = static_cast<Model>(i);
@@ -137,6 +145,74 @@ int main(int argc, char *argv[])
             if (!Grab(window, output, Helper::ToString(model), look.suffix)) {
                 return 1;
             }
+        }
+
+        // Apple Control Center Noise Control preview (AirPods Pro 3 with ANC + Conversation + live
+        // Heart Rate pill bar).
+        auto aapState = StateFor(Model::AirPods_Pro_3, 0);
+        aapState.batteryPrecision = Core::AirPods::BatteryPrecision::ExactPercent;
+        aapState.noiseControl.controllable = true;
+        aapState.noiseControl.activeMode = Core::AirPods::NoiseControlMode::NoiseCancellation;
+        aapState.noiseControl.conversationalAwareness = true;
+        aapState.noiseControl.heartRateMonitoringEnabled = true;
+        aapState.noiseControl.heartRateStatus = Core::AirPods::HeartRateStatus::Live;
+        aapState.noiseControl.heartRateBpm = 72;
+        aapState.noiseControl.heartRateConfidence = 0xE6;
+        aapState.noiseControl.heartRateHistory = {66, 68, 71, 74, 72, 70, 75, 79, 76, 73, 72};
+        aapState.estimatedMinutesRemaining = 220;
+        window.UpdateState(aapState);
+        if (!Grab(window, output, "AirPods Pro 3 ANC", look.suffix)) {
+            return 1;
+        }
+
+        // Apple Adaptive Audio + Hearing Aid preview.
+        auto adaptiveState = StateFor(Model::AirPods_Pro_3, 0);
+        adaptiveState.batteryPrecision = Core::AirPods::BatteryPrecision::ExactPercent;
+        adaptiveState.noiseControl.controllable = true;
+        adaptiveState.noiseControl.activeMode = Core::AirPods::NoiseControlMode::Adaptive;
+        adaptiveState.noiseControl.adaptiveNoiseLevel = 75;
+        adaptiveState.noiseControl.conversationalAwareness = true;
+        adaptiveState.noiseControl.conversationalAwarenessSpeaking = true;
+        adaptiveState.noiseControl.hearingAidEnabled = true;
+        window.UpdateState(adaptiveState);
+        if (!Grab(window, output, "AirPods Pro 3 Adaptive", look.suffix)) {
+            return 1;
+        }
+
+        // Non-Adaptive 3-stop capsule preview (AirPods Pro 1).
+        auto pro1Anc = StateFor(Model::AirPods_Pro, 0);
+        pro1Anc.batteryPrecision = Core::AirPods::BatteryPrecision::ExactPercent;
+        pro1Anc.noiseControl.controllable = true;
+        pro1Anc.noiseControl.activeMode = Core::AirPods::NoiseControlMode::Transparency;
+        window.UpdateState(pro1Anc);
+        if (!Grab(window, output, "AirPods Pro 1 Transparency", look.suffix)) {
+            return 1;
+        }
+
+        // Nearby other-device popup (AirPods connected to iPhone/iPad, live battery + Connect).
+        window.Disconnect();
+        window.SetQuickConnectAvailable(true);
+        auto nearbyState = StateFor(Model::AirPods_Pro_3, 0);
+        nearbyState.isNearbyOtherDevice = true;
+        nearbyState.caseBox.isLidOpened = false;
+        window.UpdateNearbyState(nearbyState, false);
+        if (!Grab(window, output, "AirPods Pro 3 Nearby", look.suffix)) {
+            return 1;
+        }
+        window.SetConnecting(true);
+        if (!Grab(window, output, "AirPods Pro 3 Nearby Connecting", look.suffix)) {
+            return 1;
+        }
+        window.SetConnecting(false);
+        window.ClearNearby();
+        window.SetQuickConnectAvailable(false);
+
+        auto hfpState = StateFor(Model::AirPods_Pro_3, 0);
+        hfpState.audioProfile = Core::AirPods::AudioProfile::HandsFree;
+        hfpState.audioProfileSource = QStringLiteral("Discord.exe");
+        window.UpdateState(hfpState);
+        if (!Grab(window, output, "AirPods Pro 3 HandsFree", look.suffix)) {
+            return 1;
         }
 
         // A colour Apple publishes, and one it does not, which falls back to the default.

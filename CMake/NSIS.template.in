@@ -119,12 +119,17 @@ VIAddVersionKey "LegalCopyright" "@CPACK_NSIS_CONTACT@"
 ; Helpers
 
 ; The application keeps its executable open for as long as it runs, and nothing can be
-; replaced underneath it. `nsExec` runs the command without a console window.
+; replaced underneath it. Request a graceful close first so Qt clears its tray icon cleanly,
+; then fall back to a forced kill if the process is still alive.
 !macro CloseRunningInstance
+  nsExec::ExecToStack 'taskkill /IM "${APP_EXE}"'
+  Pop $0
+  Pop $1
+  Sleep 500
   nsExec::ExecToStack 'taskkill /F /IM "${APP_EXE}"'
   Pop $0
   Pop $1
-  Sleep 400
+  Sleep 250
 !macroend
 
 Function CreateDesktopShortcut
@@ -146,17 +151,6 @@ FunctionEnd
 
 Function .onInit
   SetShellVarContext current
-
-  ; A per-user copy is replaced in place: its uninstaller runs silently first.
-  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "UninstallString"
-  ${If} $0 != ""
-    ReadRegStr $1 HKCU "${INSTALLER_KEY}" ""
-    ${If} $1 != ""
-      StrCpy $0 "$1\${UNINSTALLER}"
-      IfFileExists "$0" 0 +2
-        Call RunPreviousUninstaller
-    ${EndIf}
-  ${EndIf}
 
   ; A copy installed for all users predates this installer and lives in Program Files.
   ; Two copies would fight over the tray, so it has to go first; its uninstaller asks
@@ -198,6 +192,18 @@ FunctionEnd
 Section "-Install"
   SetShellVarContext current
   !insertmacro CloseRunningInstance
+
+  ; Replace a previous per-user copy only after the user has confirmed installation, so
+  ; cancelling the wizard leaves an existing installation intact.
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "UninstallString"
+  ${If} $0 != ""
+    ReadRegStr $1 HKCU "${INSTALLER_KEY}" ""
+    ${If} $1 != ""
+      StrCpy $0 "$1\${UNINSTALLER}"
+      IfFileExists "$0" 0 +2
+        Call RunPreviousUninstaller
+    ${EndIf}
+  ${EndIf}
 
   SetOutPath "$INSTDIR"
   @CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS@
@@ -250,4 +256,5 @@ Section "Uninstall"
 
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
   DeleteRegKey HKCU "${INSTALLER_KEY}"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}"
 SectionEnd

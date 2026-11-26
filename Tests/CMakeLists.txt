@@ -28,6 +28,71 @@ target_compile_definitions(
 
 add_test(NAME AirPodsDomainTests COMMAND AirPodsDomainTests)
 
+add_executable(AapProtocolTests AapProtocolTests.cpp)
+
+target_link_libraries(
+    AapProtocolTests
+
+    PRIVATE
+    apb_domain
+    Qt5::Test
+)
+
+target_include_directories(AapProtocolTests PRIVATE "${CMAKE_SOURCE_DIR}")
+
+add_test(NAME AapProtocolTests COMMAND AapProtocolTests)
+
+add_executable(
+    RadioServiceProtocolTests
+
+    RadioServiceProtocolTests.cpp
+    "${CMAKE_SOURCE_DIR}/Service/Protocol/ServiceProtocol.cpp"
+    "${CMAKE_SOURCE_DIR}/Service/Protocol/WatchdogPolicy.cpp"
+    "${CMAKE_SOURCE_DIR}/Service/Protocol/UsbIpProtocol.cpp"
+    "${CMAKE_SOURCE_DIR}/Service/Protocol/HciProxyEngine.cpp"
+    "${CMAKE_SOURCE_DIR}/Service/Protocol/Uac1MicEmulator.cpp"
+)
+
+target_link_libraries(
+    RadioServiceProtocolTests
+
+    PRIVATE
+    Qt5::Test
+)
+
+target_include_directories(RadioServiceProtocolTests PRIVATE "${CMAKE_SOURCE_DIR}")
+
+add_test(NAME RadioServiceProtocolTests COMMAND RadioServiceProtocolTests)
+
+add_executable(BatteryTrackerTests BatteryTrackerTests.cpp)
+
+target_link_libraries(
+    BatteryTrackerTests
+
+    PRIVATE
+    apb_domain
+    Qt5::Test
+)
+
+target_include_directories(BatteryTrackerTests PRIVATE "${CMAKE_SOURCE_DIR}")
+
+add_test(NAME BatteryTrackerTests COMMAND BatteryTrackerTests)
+
+add_executable(ProServicesTests ProServicesTests.cpp)
+
+target_link_libraries(
+    ProServicesTests
+
+    PRIVATE
+    apb_core
+    apb_domain
+    Qt5::Test
+)
+
+target_include_directories(ProServicesTests PRIVATE "${CMAKE_SOURCE_DIR}")
+
+add_test(NAME ProServicesTests COMMAND ProServicesTests)
+
 add_executable(QuickConnectTests QuickConnectTests.cpp)
 
 target_link_libraries(

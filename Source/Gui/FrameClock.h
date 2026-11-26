@@ -64,17 +64,25 @@ private:
         qreal refreshRate{60.0};
     };
 
+    // Shared with the worker thread so even if the destructor has to detach after the
+    // exit grace period (e.g. a stalled display), the worker never touches a destroyed
+    // `FrameClock` instance.
+    struct SharedState {
+        std::atomic<int> holders{0};
+        std::atomic<bool> pending{false};
+        std::atomic<bool> quit{false};
+        std::atomic<bool> exited{false};
+        std::mutex mutex;
+        std::condition_variable wake;
+        Target target; // under `mutex`
+        FrameClock *owner{nullptr};
+    };
+
     std::unique_ptr<Driver> _driver;
-    std::atomic<int> _holders{0};
-    std::atomic<bool> _pending{false};
-    std::atomic<bool> _quit{false};
-    std::atomic<bool> _exited{false};
-    std::mutex _mutex;
-    std::condition_variable _wake;
-    Target _target; // under `_mutex`
+    std::shared_ptr<SharedState> _state{std::make_shared<SharedState>()};
     std::thread _thread;
 
-    void Run();
+    static void Run(std::shared_ptr<SharedState> state);
     void OnFrame();
     static Target PickTarget();
 };

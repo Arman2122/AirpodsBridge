@@ -41,12 +41,14 @@ public:
     void SetAppearance(Core::Settings::Appearance appearance);
 
     Theme::Mode Mode() const;
+    bool IsTaskbarDark() const;
 
     // What `appearance` means when Windows is, or is not, dark.
     static Theme::Mode Resolve(Core::Settings::Appearance appearance, bool systemDark);
 
 Q_SIGNALS:
     void ModeChanged(Theme::Mode mode);
+    void TaskbarModeChanged(bool dark);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

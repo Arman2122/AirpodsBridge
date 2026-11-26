@@ -7,12 +7,22 @@
     #error "This file shouldn't be compiled."
 #endif
 
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.Storage.Streams.h>
-#include <winrt/Windows.Devices.Enumeration.h>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <vector>
+
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
+#include <winrt/Windows.Devices.Bluetooth.h>
+#include <winrt/Windows.Devices.Enumeration.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Networking.h>
+#include <winrt/Windows.Storage.Streams.h>
 
 #include "Source/Core/Bluetooth_abstract.h"
 #include "Source/Support/OS/Windows.h"
@@ -42,6 +52,7 @@ public:
     uint16_t GetVendorId() const override;
     uint16_t GetProductId() const override;
     DeviceState GetConnectionState() const override;
+    std::string GetContainerId() const override;
 
 private:
     constexpr static auto kPropertyBluetoothVendorId = L"System.DeviceInterface.Bluetooth.VendorId";
@@ -51,7 +62,7 @@ private:
 
     std::optional<WinrtBluetooth::BluetoothDevice> _device;
     mutable std::optional<WinrtDevicesEnumeration::DeviceInformation> _info;
-    winrt::event_token _tokenConnectionStatusChanged, _tokenNameChanged;
+    winrt::event_token _tokenConnectionStatusChanged{}, _tokenNameChanged{};
 
     void RegisterHandlers();
     void UnregisterHandlers();
@@ -79,8 +90,6 @@ private:
         return defaultValue;
     }
 
-    winrt::hstring GetAepId() const;
-
     void OnConnectionStatusChanged(const WinrtBluetooth::BluetoothDevice &sender);
     void OnNameChanged(const WinrtBluetooth::BluetoothDevice &sender);
 };
@@ -96,7 +105,7 @@ class AdvertisementWatcher final
     : public Details::AdvertisementWatcherAbstract<AdvertisementWatcher>
 {
 public:
-    using Timestamp = winrt::Windows::Foundation::DateTime;
+    using Timestamp = ReceivedAdvertisement::Timestamp;
 
     explicit AdvertisementWatcher();
     ~AdvertisementWatcher();
@@ -107,14 +116,28 @@ public:
 private:
     static constexpr inline auto kRetryInterval = 3s;
 
+    // Shared life-guard so any WinRT callback still racing with teardown checks `alive`
+    // under `mutex` and exits without touching destroyed members.
+    struct Lifetime {
+        std::mutex mutex;
+        bool alive{true};
+    };
+
+    std::shared_ptr<Lifetime> _lifetime{std::make_shared<Lifetime>()};
     WinrtBluetoothAdv::BluetoothLEAdvertisementWatcher _bleWatcher;
+    winrt::event_token _receivedToken{};
+    winrt::event_token _stoppedToken{};
     std::mutex _mutex;
 
-    std::atomic<bool> _stop{false}, _destroy{false};
-    std::atomic<std::chrono::steady_clock::time_point> _lastStartTime;
-    std::mutex _conVarMutex;
-    std::condition_variable _stopConVar, _destroyConVar;
+    std::atomic<bool> _wanted{false};
+    std::atomic<std::chrono::steady_clock::time_point> _lastStartTime{};
+    std::mutex _retryMutex;
+    std::condition_variable _retryConVar;
+    std::jthread _retryThread;
 
+    bool StartInternal();
+    void ScheduleRetry();
+    void CancelRetry();
     void OnReceived(const WinrtBluetoothAdv::BluetoothLEAdvertisementReceivedEventArgs &args);
     void OnStopped(const WinrtBluetoothAdv::BluetoothLEAdvertisementWatcherStoppedEventArgs &args);
 };

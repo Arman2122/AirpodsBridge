@@ -99,6 +99,16 @@ void Controller::SetDeviceId(QString id)
     _deviceId = std::move(id);
 }
 
+const QString &Controller::DeviceId() const
+{
+    return _deviceId;
+}
+
+bool Controller::HasDevice() const
+{
+    return !_deviceId.trimmed().isEmpty();
+}
+
 std::vector<Device> Controller::Devices()
 {
     return _devices;
@@ -137,26 +147,70 @@ void Controller::RefreshDevices()
         }};
 }
 
+void Controller::InvalidateCache()
+{
+    _backend->InvalidateCache();
+}
+
+void Controller::NotifyBluetoothConnected(bool connected)
+{
+    if (_requestRunning) {
+        if (connected) {
+            _connectedDuringRequest = true;
+        }
+        else {
+            _disconnectedDuringRequest = true;
+        }
+        return;
+    }
+    if (!_pending) {
+        return;
+    }
+    if (_pendingExpectConnected && connected) {
+        Complete(Outcome::Connected);
+    }
+    else if (!_pendingExpectConnected && !connected) {
+        Complete(Outcome::Disconnected);
+    }
+}
+
 Outcome Controller::Request()
 {
-    return Start(false);
+    return Start(RequestKind::Connect, false, true);
+}
+
+Outcome Controller::RequestConnect()
+{
+    return Start(RequestKind::Connect, false, false);
+}
+
+Outcome Controller::RequestDisconnect()
+{
+    return Start(RequestKind::Disconnect, false, false);
+}
+
+Outcome Controller::RequestToggle()
+{
+    return Start(RequestKind::Toggle, false, false);
 }
 
 Outcome Controller::RequestAutomatic()
 {
-    return Start(true);
+    return Start(RequestKind::Connect, true, false);
 }
 
-Outcome Controller::Start(bool automatic)
+Outcome Controller::Start(RequestKind kind, bool automatic, bool requireTraySwitch)
 {
     // A click while work is already under way always answers with the same outcome, whether that
     // work is the enumeration/reconnect round trip or the wait for the endpoint to come up. The
     // caller decides how loudly to report it. An automatic request has no one to tell.
     if (_pending) {
+        const Outcome inProgress =
+            _pendingExpectConnected ? Outcome::RequestStarted : Outcome::Disconnecting;
         if (!automatic) {
-            EmitOutcome(Outcome::RequestStarted, _pendingDeviceName);
+            EmitOutcome(inProgress, _pendingDeviceName);
         }
-        return Outcome::RequestStarted;
+        return inProgress;
     }
 
     if (_requestRunning) {
@@ -166,7 +220,7 @@ Outcome Controller::Start(bool automatic)
         return Outcome::RequestStarted;
     }
 
-    if (!automatic && !_enabled) {
+    if (requireTraySwitch && !_enabled) {
         EmitOutcome(Outcome::Disabled, {});
         return Outcome::Disabled;
     }
@@ -181,6 +235,7 @@ Outcome Controller::Start(bool automatic)
     _requestRunning = true;
     _requestingDeviceId = _deviceId;
     _connectedDuringRequest = false;
+    _disconnectedDuringRequest = false;
 
     if (_requestThread.joinable()) {
         _requestThread.join();
@@ -190,24 +245,43 @@ Outcome Controller::Start(bool automatic)
 
     _requestThread =
         std::thread{[backend = _backend, link = _link, stopToken = _requestStop.get_token(),
-                     requestedDeviceId = _deviceId]() {
+                     requestedDeviceId = _deviceId, kind]() {
             const auto devices = backend->ListDevices(stopToken);
+            const auto normalizedTarget = NormalizeId(requestedDeviceId);
             const auto deviceIter =
                 std::find_if(devices.begin(), devices.end(), [&](const Device &device) {
-                    return device.id == requestedDeviceId;
+                    return NormalizeId(device.id) == normalizedTarget;
                 });
 
             auto outcome = Outcome::DeviceUnavailable;
+            bool expectConnected = true;
             QString deviceName;
             if (deviceIter != devices.end()) {
                 deviceName = deviceIter->name;
-                if (deviceIter->connected) {
-                    outcome = Outcome::AlreadyConnected;
+                const bool wantDisconnect = kind == RequestKind::Disconnect ||
+                                            (kind == RequestKind::Toggle && deviceIter->connected);
+
+                if (wantDisconnect) {
+                    expectConnected = false;
+                    if (!deviceIter->connected) {
+                        outcome = Outcome::AlreadyDisconnected;
+                    }
+                    else {
+                        outcome = backend->RequestDisconnect(deviceIter->id, stopToken)
+                                      ? Outcome::Disconnecting
+                                      : Outcome::Failed;
+                    }
                 }
                 else {
-                    outcome = backend->RequestReconnect(requestedDeviceId, stopToken)
-                                  ? Outcome::RequestStarted
-                                  : Outcome::Failed;
+                    expectConnected = true;
+                    if (deviceIter->connected) {
+                        outcome = Outcome::AlreadyConnected;
+                    }
+                    else {
+                        outcome = backend->RequestReconnect(deviceIter->id, stopToken)
+                                      ? Outcome::RequestStarted
+                                      : Outcome::Failed;
+                    }
                 }
             }
 
@@ -216,37 +290,61 @@ Outcome Controller::Start(bool automatic)
             }
 
             PostToController(
-                link, [requestedDeviceId, deviceName = std::move(deviceName),
-                       outcome](Controller &self) mutable {
+                link, [requestedDeviceId, deviceName = std::move(deviceName), outcome,
+                       expectConnected](Controller &self) mutable {
                     self._requestRunning = false;
                     self._requestingDeviceId.clear();
 
                     if (outcome == Outcome::RequestStarted) {
                         if (self._connectedDuringRequest) {
                             self._connectedDuringRequest = false;
+                            self._disconnectedDuringRequest = false;
                             self._backend->StopObserving();
                             self.EmitOutcome(Outcome::Connected, deviceName);
                             return;
                         }
 
                         self._pending = true;
+                        self._pendingExpectConnected = true;
+                        self._pendingDeviceId = requestedDeviceId;
+                        self._pendingDeviceName = deviceName;
+                        self._resolveTimer.start();
+                    }
+                    else if (outcome == Outcome::Disconnecting) {
+                        if (self._disconnectedDuringRequest) {
+                            self._connectedDuringRequest = false;
+                            self._disconnectedDuringRequest = false;
+                            self._backend->StopObserving();
+                            self.EmitOutcome(Outcome::Disconnected, deviceName);
+                            return;
+                        }
+
+                        self._pending = true;
+                        self._pendingExpectConnected = false;
                         self._pendingDeviceId = requestedDeviceId;
                         self._pendingDeviceName = deviceName;
                         self._resolveTimer.start();
                     }
 
+                    Q_UNUSED(expectConnected);
                     self._connectedDuringRequest = false;
+                    self._disconnectedDuringRequest = false;
                     self.EmitOutcome(outcome, deviceName);
                 });
         }};
 
-    return Outcome::RequestStarted;
+    return kind == RequestKind::Disconnect ? Outcome::Disconnecting : Outcome::RequestStarted;
 }
 
 Outcome Controller::OnEndpointStateChanged(const QString &id, bool connected)
 {
-    if (_requestRunning && connected && NormalizeId(id) == NormalizeId(_requestingDeviceId)) {
-        _connectedDuringRequest = true;
+    if (_requestRunning && NormalizeId(id) == NormalizeId(_requestingDeviceId)) {
+        if (connected) {
+            _connectedDuringRequest = true;
+        }
+        else {
+            _disconnectedDuringRequest = true;
+        }
         return Outcome::RequestStarted;
     }
 
@@ -254,11 +352,17 @@ Outcome Controller::OnEndpointStateChanged(const QString &id, bool connected)
         return connected ? Outcome::Connected : Outcome::RequestStarted;
     }
 
-    if (NormalizeId(id) != NormalizeId(_pendingDeviceId) || !connected) {
-        return Outcome::RequestStarted;
+    if (NormalizeId(id) != NormalizeId(_pendingDeviceId)) {
+        return _pendingExpectConnected ? Outcome::RequestStarted : Outcome::Disconnecting;
     }
 
-    return Complete(Outcome::Connected);
+    if (_pendingExpectConnected && connected) {
+        return Complete(Outcome::Connected);
+    }
+    if (!_pendingExpectConnected && !connected) {
+        return Complete(Outcome::Disconnected);
+    }
+    return _pendingExpectConnected ? Outcome::RequestStarted : Outcome::Disconnecting;
 }
 
 Outcome Controller::ResolveTimedOut()
@@ -274,6 +378,7 @@ Outcome Controller::Complete(Outcome outcome)
 {
     _resolveTimer.stop();
     _pending = false;
+    _pendingExpectConnected = true;
 
     // Nothing is waiting on endpoint notifications any more; let the backend disarm whatever it
     // armed, so it stops resolving unrelated device changes for the rest of the process lifetime.

@@ -23,8 +23,11 @@ public:
     explicit SegmentedControl(QWidget *parent = nullptr);
 
     void AddSegment(const QString &text);
+    void Clear();
+    int SegmentCount() const;
     int CurrentIndex() const;
     void SetCurrentIndex(int index);
+    void SetSegmentPadding(int padding);
 
     QSize sizeHint() const override;
 
@@ -39,6 +42,7 @@ protected:
 private:
     QStringList _segments;
     int _currentIndex{-1};
+    int _segmentPadding{14};
 
     QFont SelectedFont() const;
     QRectF SegmentRect(int index) const;

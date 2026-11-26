@@ -4,7 +4,11 @@
 #pragma once
 
 #include <functional>
+#include <optional>
+#include <string>
+#include <vector>
 
+#include "Source/Domain/BluetoothTypes.h"
 #include "Source/Support/Helper.h"
 
 namespace Core::Bluetooth {
@@ -31,6 +35,10 @@ public:
     virtual uint16_t GetProductId() const = 0;
     virtual uint16_t GetVendorId() const = 0;
     virtual DeviceState GetConnectionState() const = 0;
+    virtual std::string GetContainerId() const
+    {
+        return {};
+    }
 
     inline auto &CbConnectionStatusChanged()
     {
@@ -62,12 +70,7 @@ class AdvertisementWatcherAbstract
 public:
     enum class State { Started, Stopped };
 
-    struct ReceivedData {
-        int16_t rssi{};
-        typename Derived::Timestamp timestamp;
-        uint64_t address{};
-        std::map<uint16_t, std::vector<uint8_t>> manufacturerDataMap;
-    };
+    using ReceivedData = Core::Bluetooth::ReceivedAdvertisement;
     using FnReceived = std::function<void(const ReceivedData &)>;
     using FnStateChanged = std::function<void(State, const std::optional<std::string> &)>;
 

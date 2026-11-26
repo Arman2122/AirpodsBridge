@@ -77,6 +77,7 @@ int main(int argc, char *argv[])
     auto repository = std::make_unique<Core::Settings::MemoryRepository>();
     repository->Write("abi_version", Core::Settings::kFieldsAbiVersion);
     repository->Write("device_address", QVariant::fromValue<qulonglong>(0xF433B7263664ULL));
+    repository->Write("bound_device_name", "AirPods Pro 3");
     repository->Write("tray_quick_connect_enabled", true);
     repository->Write("tray_quick_connect_device_id", "{preview}");
     repository->Write("tray_icon_battery", "WhenLowBattery");
@@ -84,12 +85,89 @@ int main(int argc, char *argv[])
     repository->Write("automatic_ear_detection", false);
     repository->Write("auto_connect_on_lid_open", true);
     repository->Write("low_battery_threshold", 30u);
+    repository->Write("full_charge_notification", true);
+    repository->Write("preferred_mic_device_id", "{mic-audient}");
+    repository->Write("auto_switch_audio_on_connect", true);
+    repository->Write("smart_audio_routing", true);
+    repository->Write("volume_cap_enabled", true);
+    repository->Write("volume_cap_level", 75u);
+    repository->Write("audio_keep_alive", true);
+    repository->Write("hotkey_toggle_connect", "Ctrl+Alt+A");
+    repository->Write("hotkey_toggle_popup", "Ctrl+Alt+B");
     Core::Settings::SetRepository(std::move(repository));
     Core::Settings::Load();
 
     Core::QuickConnect::Controller quickConnect{std::make_shared<PreviewBackend>()};
 
     Gui::SettingsWindow window{quickConnect};
+    window.SetAudioEndpointsProvider([] {
+        return std::vector<Core::AudioControl::AudioEndpoint>{
+            {.id = "{mic-audient}", .name = "Analogue 1/2 (Audient iD14)", .isDefault = true},
+            {.id = "{mic-razer}", .name = "Microphone (Razer Kraken V4 - Chat)"},
+        };
+    });
+    window.SetDiagnosticsProvider([] {
+        return Gui::SettingsWindow::DiagnosticsInfo{
+            .transportSummary =
+                "AAP L2CAP connected via No-Test-Mode Radio Service (WinUSB + usbip-win2).",
+            .connectionSummary =
+                "AirPods Pro 3 · Connected · A2DP Stereo (AAC) · Stream awake · -58 dBm",
+            .clipboardReport = "{\"ok\":true}",
+        };
+    });
+    window.SetRadioControlProvider([] {
+        Core::AirPods::State previewState;
+        previewState.model = Core::AirPods::Model::AirPods_Pro_3;
+        previewState.displayName = QStringLiteral("AirPods Pro 3");
+        previewState.noiseControl.controllable = true;
+        previewState.noiseControl.activeMode = Core::AirPods::NoiseControlMode::Adaptive;
+        previewState.noiseControl.conversationalAwareness = true;
+        previewState.noiseControl.adaptiveNoiseLevel = 65;
+        previewState.noiseControl.personalizedVolume = true;
+        previewState.noiseControl.oneBudAnc = true;
+        previewState.noiseControl.loudSoundReduction = true;
+        previewState.noiseControl.allowOffListeningMode = true;
+        previewState.noiseControl.microphoneSide = Core::AirPods::MicrophoneSide::Auto;
+        previewState.noiseControl.toneVolume = 85;
+        previewState.noiseControl.headGestures = true;
+        previewState.noiseControl.hearingAidEnabled = false;
+        previewState.noiseControl.mediaAssistEnabled = false;
+        previewState.noiseControl.heartRateMonitoringEnabled = true;
+        previewState.noiseControl.heartRateStatus = Core::AirPods::HeartRateStatus::Live;
+        previewState.noiseControl.heartRateBpm = 72;
+        previewState.noiseControl.heartRateConfidence = 0xE6;
+        previewState.noiseControl.heartRateMinBpm = 64;
+        previewState.noiseControl.heartRateMaxBpm = 88;
+        previewState.noiseControl.heartRateAvgBpm = 73;
+        previewState.noiseControl.heartRateHistory = {64, 67, 70, 74, 71, 69,
+                                                      73, 79, 88, 82, 76, 72};
+        return Gui::SettingsWindow::RadioControlInfo{
+            .engineHeadline = QStringLiteral("Active"),
+            .engineDetail =
+                QStringLiteral("Active (WinUSB + signed usbip-win2, Secure Boot ON). 1 AAP "
+                               "channel(s) open \u00B7 3.75 ms poll latency."),
+            .adapterSummary =
+                QStringLiteral("Intel(R) Wireless Bluetooth(R) (VID 8087 / PID 0036) \u00B7 "
+                               "Proxied via WinUSB"),
+            .serviceInstalled = true,
+            .serviceRunning = true,
+            .guardTripped = false,
+            .aapConnected = true,
+            .heartRateServiceId = uint8_t{20},
+            .state = previewState,
+        };
+    });
+    window.SetLatencyDiagnosticsProvider([] {
+        return Core::AudioControl::LatencyDiagnostics{
+            .codec = QStringLiteral("AAC"),
+            .aacEnabled = true,
+            .enhancementsEnabled = true,
+            .enginePeriodMs = 10.0,
+            .minPeriodMs = 3.0,
+            .keepAliveEnabled = true,
+            .keepAliveActive = true,
+        };
+    });
     // Lays the window out and runs showEvent without putting a window on the desktop.
     window.setAttribute(Qt::WA_DontShowOnScreen);
     window.show();
@@ -108,6 +186,9 @@ int main(int argc, char *argv[])
     constexpr Page kPages[] = {
         {Gui::SettingsWindow::Section::General, "General"},
         {Gui::SettingsWindow::Section::Display, "Display"},
+        {Gui::SettingsWindow::Section::Control, "Control"},
+        {Gui::SettingsWindow::Section::Health, "Health"},
+        {Gui::SettingsWindow::Section::Audio, "Audio"},
         {Gui::SettingsWindow::Section::Features, "Features"},
         {Gui::SettingsWindow::Section::About, "About"},
     };
@@ -146,6 +227,23 @@ int main(int argc, char *argv[])
                 auto *bar = scroll->verticalScrollBar();
                 if (!scroll->isVisible() || bar->maximum() == 0) {
                     continue;
+                }
+                if (bar->maximum() > 450) {
+                    bar->setValue(bar->maximum() * 32 / 100);
+                    Settle(50);
+                    const auto midPath = output.filePath(
+                        QStringLiteral("Settings-%1-mid%2.png").arg(page.name, look.suffix));
+                    if (window.grab().save(midPath)) {
+                        qInfo("Wrote %s", qPrintable(midPath));
+                    }
+
+                    bar->setValue(bar->maximum() * 68 / 100);
+                    Settle(50);
+                    const auto lowerPath = output.filePath(
+                        QStringLiteral("Settings-%1-lower%2.png").arg(page.name, look.suffix));
+                    if (window.grab().save(lowerPath)) {
+                        qInfo("Wrote %s", qPrintable(lowerPath));
+                    }
                 }
                 bar->setValue(bar->maximum());
                 Settle(50);

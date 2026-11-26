@@ -3,13 +3,11 @@
 
 #include "Source/Domain/AirPodsAdvertisement.h"
 
-#include <cstring>
-
 #include "Source/Support/Assert.h"
 
 namespace Core::AirPods::Details {
 
-bool Advertisement::IsDesiredAdv(const Bluetooth::AdvertisementWatcher::ReceivedData &data)
+bool Advertisement::IsDesiredAdv(const Bluetooth::ReceivedAdvertisement &data)
 {
     auto iter = data.manufacturerDataMap.find(AppleCP::VendorId);
     if (iter == data.manufacturerDataMap.end()) {
@@ -18,18 +16,18 @@ bool Advertisement::IsDesiredAdv(const Bluetooth::AdvertisementWatcher::Received
     return AppleCP::AirPods::IsValid(iter->second);
 }
 
-Advertisement::Advertisement(const Bluetooth::AdvertisementWatcher::ReceivedData &data)
+Advertisement::Advertisement(const Bluetooth::ReceivedAdvertisement &data)
+    : _data{data}, _protocol{[&] {
+          APB_ASSERT(IsDesiredAdv(data));
+          auto parsed = AppleCP::AirPods::Parse(GetMfrData());
+          APB_ASSERT(parsed.has_value());
+          return std::move(parsed.value());
+      }()}
 {
-    APB_ASSERT(IsDesiredAdv(data));
-    _data = data;
-
-    auto protocol = AppleCP::As<AppleCP::AirPods>(GetMfrData());
-    APB_ASSERT(protocol.has_value());
-    _protocol = std::move(protocol.value());
-
     _state.model = _protocol.GetModel();
     _state.colour = _protocol.GetColourCode();
     _state.side = _protocol.GetBroadcastedSide();
+    _state.batteryPrecision = BatteryPrecision::CoarseTenPercent;
 
     _state.pods.left.battery = _protocol.GetLeftBattery();
     _state.pods.left.isCharging = _protocol.IsLeftCharging();
@@ -43,6 +41,7 @@ Advertisement::Advertisement(const Bluetooth::AdvertisementWatcher::ReceivedData
     _state.caseBox.isCharging = _protocol.IsCaseCharging();
     _state.caseBox.isBothPodsInCase = _protocol.IsBothPodsInCase();
     _state.caseBox.isLidOpened = _protocol.IsLidOpened();
+    _state.lidOpenCounter = _protocol.GetLidOpenCounter();
 
     if (_state.pods.left.battery.Available()) {
         _state.pods.left.battery = _state.pods.left.battery.Value() * 10;
@@ -72,10 +71,9 @@ auto Advertisement::GetAddress() const -> AddressType
 
 std::vector<uint8_t> Advertisement::GetDesensitizedData() const
 {
-    auto desensitizedData = _protocol.Desensitize();
-    std::vector<uint8_t> result(sizeof(desensitizedData), 0);
-    std::memcpy(result.data(), &desensitizedData, sizeof(desensitizedData));
-    return result;
+    const auto desensitized = _protocol.Desensitize();
+    const auto &bytes = desensitized.RawBytes();
+    return {bytes.begin(), bytes.end()};
 }
 
 auto Advertisement::GetAdvState() const -> const AdvState &

@@ -30,6 +30,7 @@ public:
 private:
     QLabel *_title;
     QLabel *_description;
+    QWidget *_control{nullptr};
 };
 
 //

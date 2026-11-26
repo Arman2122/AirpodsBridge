@@ -150,7 +150,10 @@ void Battery::drawChargingIcon(QPainter &painter)
         path.closeSubpath();
 
         painter.setPen(Qt::NoPen);
-        painter.fillPath(path, QBrush{_fillColor.isValid() ? _fillColor : getNormalColor()});
+        const QColor boltColor = _chargingIconColor.isValid()
+                                     ? _chargingIconColor
+                                     : (_fillColor.isValid() ? _fillColor : getNormalColor());
+        painter.fillPath(path, QBrush{boltColor});
     }
     painter.restore();
 }
@@ -298,6 +301,8 @@ void Battery::setValue(ValueType value)
     }
 
     _value = value;
+    setAccessibleName(
+        _isCharging ? tr("Battery %1%, charging").arg(_value) : tr("Battery %1%").arg(_value));
     update();
 
     Q_EMIT valueChanged(_value);
@@ -381,6 +386,8 @@ void Battery::setCharging(bool value)
         return;
     }
     _isCharging = value;
+    setAccessibleName(
+        _isCharging ? tr("Battery %1%, charging").arg(_value) : tr("Battery %1%").arg(_value));
     update();
 
     Q_EMIT chargingStateChanged(_isCharging);
@@ -392,7 +399,13 @@ void Battery::setShowText(bool value)
         return;
     }
     _isShowText = value;
-    update();
+    if (!_batterySize.isEmpty()) {
+        setBatterySize(
+            static_cast<int>(_batterySize.width()), static_cast<int>(_batterySize.height()));
+    }
+    else {
+        update();
+    }
 }
 
 void Battery::setTextPadding(qreal value)

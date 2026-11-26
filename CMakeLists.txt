@@ -276,11 +276,14 @@ set(
 set(
     APB_DOMAIN_CODE_FILES
 
+    "Source/Domain/AapProtocol.cpp"
     "Source/Domain/AirPodsState.cpp"
     "Source/Domain/AirPodsAdvertisement.cpp"
     "Source/Domain/AirPodsStateManager.cpp"
     "Source/Domain/AppleCP.cpp"
     "Source/Domain/AutomationPolicies.cpp"
+    "Source/Domain/BatteryTracker.cpp"
+    "Source/Domain/RtBuddySensor.cpp"
 )
 
 set(
@@ -289,6 +292,8 @@ set(
     "Source/Core/Debug.cpp"
     "Source/Core/Update.cpp"
     "Source/Core/AirPods.cpp"
+    "Source/Core/AudioControl.h"
+    "Source/Core/GlobalHotkeys.h"
     "Source/Core/QuickConnect.cpp"
     "Source/Core/Settings.cpp"
     "Source/Core/SettingsRepository.cpp"
@@ -312,10 +317,14 @@ set(
     "Source/Gui/SelectWindow.cpp"
     "Source/Gui/DownloadWindow.cpp"
     "Source/Gui/SettingsWindow.cpp"
+    "Source/Gui/WelcomeDialog.cpp"
     "Source/Gui/ThemeController.cpp"
     "Source/Gui/FrameClock.cpp"
+    "Source/Gui/Widget/AppleNoiseControl.cpp"
     "Source/Gui/Widget/Battery.cpp"
+    "Source/Gui/Widget/HeartRateCard.cpp"
     "Source/Gui/Widget/Label.cpp"
+    "Source/Gui/Widget/ProgressBar.cpp"
     "Source/Gui/Widget/PushButton.cpp"
     "Source/Gui/Widget/Toggle.cpp"
     "Source/Gui/Widget/SegmentedControl.cpp"
@@ -336,11 +345,19 @@ set(ADD_EXECUTABLE_ARG)
 
 if (WIN32)
     list(APPEND APB_CORE_CODE_FILES
+        "Service/Protocol/ServiceProtocol.cpp"
+        "Source/Core/AirPodsServiceTransport_win.cpp"
+        "Source/Core/AirPodsTransport_win.cpp"
+        "Source/Core/AudioControl_win.cpp"
         "Source/Core/AutoStart_win.cpp"
         "Source/Core/Bluetooth_win.cpp"
         "Source/Core/DisplayTiming_win.cpp"
+        "Source/Core/GlobalHotkeys_win.cpp"
         "Source/Core/GlobalMedia_win.cpp"
+        "Source/Core/Ipc_win.cpp"
+        "Source/Core/Notifications_win.cpp"
         "Source/Core/QuickConnect_win.cpp"
+        "Source/Core/SystemEvents_win.cpp"
         "Source/Core/SystemTheme_win.cpp"
         "Source/Core/WindowEffects_win.cpp"
     )
@@ -441,7 +458,9 @@ target_link_libraries(
 )
 
 if (WIN32)
-    target_link_libraries(apb_core PRIVATE Ole32 Uuid Ksuser Dwmapi Gdi32)
+    target_link_libraries(
+        apb_core PRIVATE Ole32 OleAut32 Uuid Ksuser Dwmapi Gdi32 Cfgmgr32 Shell32 Propsys Avrt
+                         Wbemuuid)
 endif()
 
 target_link_libraries(

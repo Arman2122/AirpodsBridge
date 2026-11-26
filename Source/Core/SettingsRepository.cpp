@@ -6,6 +6,8 @@
 #include <QSettings>
 
 #include <Config.h>
+#include "Source/Support/Logger.h"
+#include "Source/Support/Utils.h"
 
 namespace Core::Settings {
 
@@ -14,6 +16,15 @@ namespace {
 class QSettingsRepository final : public Repository
 {
 public:
+    QSettingsRepository()
+        : _settings{QSettings::UserScope, Config::ProgramName, Config::ProgramName}
+    {
+    }
+
+    explicit QSettingsRepository(const QString &iniPath) : _settings{iniPath, QSettings::IniFormat}
+    {
+    }
+
     bool Contains(const QString &key) const override
     {
         return _settings.contains(key);
@@ -35,7 +46,7 @@ public:
     }
 
 private:
-    mutable QSettings _settings{QSettings::UserScope, Config::ProgramName, Config::ProgramName};
+    mutable QSettings _settings;
 };
 
 } // namespace
@@ -62,6 +73,11 @@ void MemoryRepository::Remove(const QString &key)
 
 std::unique_ptr<Repository> CreatePersistentRepository()
 {
+    if (Utils::File::IsPortableMode()) {
+        const auto iniPath = Utils::File::GetPortableConfigPath();
+        LOG(Info, "Portable mode active: storing settings in '{}'.", iniPath);
+        return std::make_unique<QSettingsRepository>(iniPath);
+    }
     return std::make_unique<QSettingsRepository>();
 }
 

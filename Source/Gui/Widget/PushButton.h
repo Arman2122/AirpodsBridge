@@ -24,8 +24,17 @@ class PushButton : public QPushButton
 public:
     explicit PushButton(QWidget *parent = nullptr);
 
+    void SetPrimary(bool primary);
+    bool IsPrimary() const;
+    void SetPill(bool pill);
+    bool IsPill() const;
+
 protected:
     void paintEvent(QPaintEvent *event) override;
+
+private:
+    bool _primary{false};
+    bool _pill{false};
 };
 
 } // namespace Gui::Widget

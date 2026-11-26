@@ -18,4 +18,9 @@ inline void Pause()
 {
     Controller::GetInstance().Pause();
 }
+
+inline void Shutdown()
+{
+    Controller::GetInstance().Shutdown();
+}
 } // namespace Core::GlobalMedia

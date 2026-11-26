@@ -3,15 +3,31 @@
 
 #include "Source/Gui/TrayIcon.h"
 
-#include "Source/Presentation/Theme.h"
+#include <array>
 
-#include <QFont>
 #include <QApplication>
+#include <QFont>
 #include <QPainter>
 #include <QSvgRenderer>
 
 #include <Config.h>
+#include "Source/Presentation/Theme.h"
+
 namespace Gui {
+namespace {
+
+// Windows NOTIFYICONDATA.szTip holds 128 wchar_t including the NUL terminator.
+constexpr int kWindowsTrayToolTipLimit = 127;
+
+QString ClampTrayToolTip(const QString &text)
+{
+    if (text.size() <= kWindowsTrayToolTipLimit) {
+        return text;
+    }
+    return text.left(kWindowsTrayToolTipLimit - 1) + QChar{0x2026};
+}
+
+} // namespace
 
 TrayIcon::TrayIcon(Core::QuickConnect::Controller &quickConnect)
     : _quickConnect{quickConnect}, _settingsWindow{quickConnect}
@@ -22,6 +38,11 @@ TrayIcon::TrayIcon(Core::QuickConnect::Controller &quickConnect)
     });
 
     connect(_actionNewVersion, &QAction::triggered, this, &TrayIcon::OnNewVersionClicked);
+    connect(
+        _actionQuickConnect, &QAction::triggered, this, [this] { _quickConnect.RequestToggle(); });
+    connect(_actionSwitchAudio, &QAction::triggered, this, [this] {
+        emit SwitchAudioOutputRequested();
+    });
     connect(_actionSettings, &QAction::triggered, this, &TrayIcon::OnSettingsClicked);
     connect(_actionAbout, &QAction::triggered, this, &TrayIcon::OnAboutClicked);
     connect(_actionQuit, &QAction::triggered, qApp, &QApplication::quit, Qt::QueuedConnection);
@@ -30,6 +51,66 @@ TrayIcon::TrayIcon(Core::QuickConnect::Controller &quickConnect)
     connect(
         &_quickConnect, &Core::QuickConnect::Controller::OutcomeChanged, this,
         &TrayIcon::OnQuickConnectOutcome);
+    connect(
+        &_quickConnect, &Core::QuickConnect::Controller::DevicesChanged, this,
+        &TrayIcon::RefreshQuickConnectMenu);
+
+    connect(
+        &_settingsWindow, &SettingsWindow::BindDeviceRequested, this,
+        &TrayIcon::BindDeviceRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::ManualUpdateCheckRequested, this,
+        &TrayIcon::ManualUpdateCheckRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::LatencyProfileSwitchRequested, this,
+        &TrayIcon::LatencyProfileSwitchRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::RadioServiceActionRequested, this,
+        &TrayIcon::RadioServiceActionRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::NoiseControlModeRequested, this,
+        &TrayIcon::NoiseControlModeRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::ConversationalAwarenessRequested, this,
+        &TrayIcon::ConversationalAwarenessRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::AdaptiveNoiseLevelRequested, this,
+        &TrayIcon::AdaptiveNoiseLevelRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::OneBudAncRequested, this, &TrayIcon::OneBudAncRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::PersonalizedVolumeRequested, this,
+        &TrayIcon::PersonalizedVolumeRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::LoudSoundReductionRequested, this,
+        &TrayIcon::LoudSoundReductionRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::HeadGesturesRequested, this,
+        &TrayIcon::HeadGesturesRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::MicrophoneSideRequested, this,
+        &TrayIcon::MicrophoneSideRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::PressSpeedRequested, this,
+        &TrayIcon::PressSpeedRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::PressHoldDurationRequested, this,
+        &TrayIcon::PressHoldDurationRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::ToneVolumeRequested, this,
+        &TrayIcon::ToneVolumeRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::AllowOffListeningModeRequested, this,
+        &TrayIcon::AllowOffListeningModeRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::HearingAidRequested, this,
+        &TrayIcon::HearingAidRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::MediaAssistRequested, this,
+        &TrayIcon::MediaAssistRequested);
+    connect(
+        &_settingsWindow, &SettingsWindow::HeartRateMonitoringRequested, this,
+        &TrayIcon::HeartRateMonitoringRequested);
 
     connect(
         this, &TrayIcon::OnTrayIconBatteryChangedSafely, this, &TrayIcon::OnTrayIconBatteryChanged);
@@ -37,9 +118,41 @@ TrayIcon::TrayIcon(Core::QuickConnect::Controller &quickConnect)
         this, &TrayIcon::OnLowBatteryThresholdChangedSafely, this,
         &TrayIcon::OnLowBatteryThresholdChanged);
 
+    // Build the AAP Noise Control submenu (hidden until an AAP control transport connects).
+    _noiseControlGroup->setExclusive(true);
+    const auto addNoiseAction = [&](const QString &label, Core::AirPods::NoiseControlMode mode) {
+        auto *action = _noiseControlMenu->addAction(label);
+        action->setCheckable(true);
+        _noiseControlGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, mode] {
+            emit NoiseControlModeRequested(mode);
+        });
+        return action;
+    };
+    _actionNoiseOff = addNoiseAction(tr("Off"), Core::AirPods::NoiseControlMode::Off);
+    _actionNoiseAnc = addNoiseAction(
+        tr("Noise Cancellation"), Core::AirPods::NoiseControlMode::NoiseCancellation);
+    _actionNoiseTransparency =
+        addNoiseAction(tr("Transparency"), Core::AirPods::NoiseControlMode::Transparency);
+    _actionNoiseAdaptive =
+        addNoiseAction(tr("Adaptive"), Core::AirPods::NoiseControlMode::Adaptive);
+
+    _noiseControlMenu->addSeparator();
+    _actionConversationalAwareness = _noiseControlMenu->addAction(tr("Conversation Awareness"));
+    _actionConversationalAwareness->setCheckable(true);
+    connect(_actionConversationalAwareness, &QAction::triggered, this, [this](bool checked) {
+        emit ConversationalAwarenessRequested(checked);
+    });
+
     _actionNewVersion->setVisible(false);
+    _actionQuickConnect->setVisible(false);
+    _actionSwitchAudio->setVisible(false);
+    _noiseControlMenu->menuAction()->setVisible(false);
 
     _menu->addAction(_actionNewVersion);
+    _menu->addAction(_actionQuickConnect);
+    _menu->addAction(_actionSwitchAudio);
+    _menu->addMenu(_noiseControlMenu);
     _menu->addSeparator();
     _menu->addAction(_actionSettings);
     _menu->addSeparator();
@@ -55,6 +168,9 @@ void TrayIcon::UpdateState(const Core::AirPods::State &state)
 {
     _status = Status::Updating;
     _airPodsState = state;
+    if (_settingsWindow.isVisible()) {
+        _settingsWindow.RefreshRadioControl();
+    }
     Repaint();
 }
 
@@ -85,11 +201,91 @@ void TrayIcon::Unbind()
     Repaint();
 }
 
+void TrayIcon::SetDeviceConnected(bool connected)
+{
+    if (_deviceConnected == connected) {
+        return;
+    }
+    _deviceConnected = connected;
+    UpdateDynamicMenus();
+}
+
 void TrayIcon::VersionUpdateAvailable(const Core::Update::ReleaseInfo &releaseInfo)
 {
     _updateReleaseInfo = releaseInfo;
     _actionNewVersion->setVisible(true);
     Repaint();
+}
+
+void TrayIcon::SetUpdateCheckFeedback(Core::Update::CheckStatus status, const QString &version)
+{
+    _settingsWindow.SetUpdateCheckFeedback(status, version);
+}
+
+void TrayIcon::RefreshQuickConnectMenu()
+{
+    UpdateDynamicMenus();
+}
+
+void TrayIcon::RefreshSettings()
+{
+    _settingsWindow.RefreshBindingState();
+}
+
+void TrayIcon::OpenSettings(SettingsWindow::Section section)
+{
+    _settingsWindow.SelectSection(section);
+    _settingsWindow.show();
+    _settingsWindow.raise();
+    _settingsWindow.activateWindow();
+}
+
+void TrayIcon::SetAudioEndpointsProvider(SettingsWindow::AudioEndpointsProvider provider)
+{
+    _settingsWindow.SetAudioEndpointsProvider(std::move(provider));
+}
+
+void TrayIcon::SetDiagnosticsProvider(SettingsWindow::DiagnosticsProvider provider)
+{
+    _settingsWindow.SetDiagnosticsProvider(std::move(provider));
+}
+
+void TrayIcon::SetLatencyDiagnosticsProvider(SettingsWindow::LatencyDiagnosticsProvider provider)
+{
+    _settingsWindow.SetLatencyDiagnosticsProvider(std::move(provider));
+}
+
+void TrayIcon::SetRadioControlProvider(SettingsWindow::RadioControlProvider provider)
+{
+    _settingsWindow.SetRadioControlProvider(std::move(provider));
+}
+
+void TrayIcon::NotifyAudioEndpointsChanged()
+{
+    _settingsWindow.RefreshAudioDevices();
+}
+
+void TrayIcon::NotifyLatencyDiagnosticsChanged()
+{
+    _settingsWindow.RefreshLatencyDiagnostics();
+    _settingsWindow.RefreshDiagnostics();
+}
+
+void TrayIcon::NotifyRadioControlChanged()
+{
+    _settingsWindow.RefreshRadioControl();
+    _settingsWindow.RefreshDiagnostics();
+}
+
+void TrayIcon::SetRadioSetupBusy(bool busy, const QString &statusText)
+{
+    _settingsWindow.SetRadioSetupBusy(busy, statusText);
+    _settingsWindow.RefreshDiagnostics();
+}
+
+void TrayIcon::SetRadioSetupProgress(int percent, const QString &statusText)
+{
+    _settingsWindow.SetRadioSetupProgress(percent, statusText);
 }
 
 void TrayIcon::ShowMainWindow()
@@ -99,11 +295,56 @@ void TrayIcon::ShowMainWindow()
 
 void TrayIcon::ShowContextMenu(const QPoint &position)
 {
+    UpdateDynamicMenus();
     _menu->popup(position);
+}
+
+void TrayIcon::UpdateDynamicMenus()
+{
+    const bool hasQuickConnectDevice = _quickConnect.HasDevice();
+    _actionQuickConnect->setVisible(hasQuickConnectDevice);
+    if (hasQuickConnectDevice) {
+        QString deviceName = _quickConnect.DeviceNameFor(_quickConnect.DeviceId());
+        if (deviceName.isEmpty() && _airPodsState.has_value()) {
+            deviceName = _airPodsState->displayName;
+        }
+        if (deviceName.isEmpty()) {
+            deviceName = tr("AirPods");
+        }
+        _actionQuickConnect->setText(
+            _deviceConnected ? tr("Disconnect %1").arg(deviceName)
+                             : tr("Connect %1").arg(deviceName));
+    }
+    _actionSwitchAudio->setVisible(_deviceConnected);
+
+    bool showNoiseMenu = false;
+    if (_airPodsState.has_value()) {
+        const auto &state = _airPodsState.value();
+        const auto caps = Core::AirPods::CapabilitiesFor(state.model);
+        if (state.noiseControl.controllable && caps.SupportsNoiseControl()) {
+            showNoiseMenu = true;
+            _actionNoiseAdaptive->setVisible(caps.supportsAdaptiveAudio);
+
+            const auto mode =
+                state.noiseControl.activeMode.value_or(Core::AirPods::NoiseControlMode::Off);
+            _actionNoiseOff->setChecked(mode == Core::AirPods::NoiseControlMode::Off);
+            _actionNoiseAnc->setChecked(mode == Core::AirPods::NoiseControlMode::NoiseCancellation);
+            _actionNoiseTransparency->setChecked(
+                mode == Core::AirPods::NoiseControlMode::Transparency);
+            _actionNoiseAdaptive->setChecked(mode == Core::AirPods::NoiseControlMode::Adaptive);
+
+            _actionConversationalAwareness->setVisible(caps.supportsConversationalAwareness);
+            _actionConversationalAwareness->setChecked(
+                state.noiseControl.conversationalAwareness.value_or(false));
+        }
+    }
+    _noiseControlMenu->menuAction()->setVisible(showNoiseMenu);
 }
 
 void TrayIcon::Repaint()
 {
+    UpdateDynamicMenus();
+
     QString toolTipContent;
     Core::AirPods::Battery minBattery;
 
@@ -120,6 +361,9 @@ void TrayIcon::Repaint()
         const auto &state = _airPodsState.value();
 
         toolTipContent += state.displayName;
+        if (state.audioProfile == Core::AirPods::AudioProfile::HandsFree) {
+            toolTipContent += QStringLiteral(" (%1)").arg(tr("Hands-Free"));
+        }
 
         const auto strLeft{tr("Left")}, strRight{tr("Right")}, strCase{tr("Case")},
             strCharging{tr("charging")};
@@ -182,41 +426,38 @@ void TrayIcon::Repaint()
         toolTipContent += '\n' + _actionNewVersion->text();
     }
 
-    const auto toolTip = "AirpodsBridge\n" + toolTipContent.trimmed();
+    const auto toolTip = ClampTrayToolTip("AirpodsBridge\n" + toolTipContent.trimmed());
     _tray->setToolTip(toolTip);
     emit ToolTipChanged(toolTip);
 
     // RepaintIcon
 
     std::optional<QString> iconText;
+    bool isLow = false;
 
-    do {
-        if (minBattery.Available()) {
-            const auto drawBattery = [&] {
-                switch (_trayIconBatteryBehavior) {
-                case Core::Settings::TrayIconBatteryBehavior::Disable:
-                    return false;
-                case Core::Settings::TrayIconBatteryBehavior::WhenLowBattery:
-                    return minBattery.IsLowBattery(_lowBatteryThreshold);
-                case Core::Settings::TrayIconBatteryBehavior::Always:
-                    return true;
-                default:
-                    return false;
-                }
-            }();
-
-            if (drawBattery) {
-                iconText = QString::number(minBattery.Value());
-                break;
+    if (minBattery.Available()) {
+        isLow = minBattery.IsLowBattery(_lowBatteryThreshold);
+        const auto drawBattery = [&] {
+            switch (_trayIconBatteryBehavior) {
+            case Core::Settings::TrayIconBatteryBehavior::Disable:
+                return false;
+            case Core::Settings::TrayIconBatteryBehavior::WhenLowBattery:
+                return isLow;
+            case Core::Settings::TrayIconBatteryBehavior::Always:
+                return true;
+            default:
+                return false;
             }
+        }();
+
+        if (drawBattery) {
+            iconText = QString::number(minBattery.Value());
         }
+    }
 
-        iconText.reset();
-    } while (false);
-
-    static const QColor kNewVersionAvailableDot = Qt::yellow;
     const IconRenderState nextIconRenderState{
         .text = iconText,
+        .isLow = isLow,
         .showUpdateDot = _updateReleaseInfo.has_value(),
     };
 
@@ -224,115 +465,79 @@ void TrayIcon::Repaint()
         return;
     }
 
-    auto optIcon = GenerateIcon(
-        64, nextIconRenderState.text,
-        nextIconRenderState.showUpdateDot ? std::optional<QColor>{kNewVersionAvailableDot}
-                                          : std::nullopt);
-    if (optIcon.has_value()) {
-        _tray->setIcon(QIcon{QPixmap::fromImage(optIcon.value())});
-        _lastIconRenderState = nextIconRenderState;
-    }
+    const auto dotColor = nextIconRenderState.showUpdateDot
+                              ? std::optional<QColor>{Theme::Light().Accent}
+                              : std::nullopt;
+    _tray->setIcon(
+        GenerateMultiSizeIcon(nextIconRenderState.text, nextIconRenderState.isLow, dotColor));
+    _lastIconRenderState = nextIconRenderState;
 }
 
-std::optional<QImage> TrayIcon::GenerateIcon(
-    int size, const std::optional<QString> &optText, const std::optional<QColor> &dot)
+QIcon TrayIcon::GenerateMultiSizeIcon(
+    const std::optional<QString> &optText, bool isLow, const std::optional<QColor> &dot)
 {
-    QImage result{size, size, QImage::Format_ARGB32};
-    QPainter painter{&result};
+    // Render crisp exact-pixel sizes covering 100%, 125%, 150%, 200%, and high-DPI trays
+    // instead of letting Windows blur a single 64px bitmap down to 16px.
+    QIcon icon;
+    constexpr std::array<int, 5> kSizes{16, 20, 24, 32, 64};
+    for (const int size : kSizes) {
+        icon.addPixmap(QPixmap::fromImage(GenerateIcon(size, optText, isLow, dot)));
+    }
+    return icon;
+}
 
+QImage TrayIcon::GenerateIcon(
+    int size, const std::optional<QString> &optText, bool isLow, const std::optional<QColor> &dot)
+{
+    QImage result{size, size, QImage::Format_ARGB32_Premultiplied};
     result.fill(Qt::transparent);
+
+    QPainter painter{&result};
+    painter.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
 
     QSvgRenderer{QString{Config::QrcIconSvg}}.render(&painter);
 
-    painter.setRenderHint(QPainter::Antialiasing);
-
-    painter.save();
-    do {
-        if (!optText.has_value() || optText->isEmpty()) {
-            break;
-        }
+    if (optText.has_value() && !optText->isEmpty()) {
+        painter.save();
         const auto &text = optText.value();
 
-        static std::unordered_map<int, std::optional<QFont>> trayIconFonts;
+        QFont font = Theme::Font::Body();
+        font.setBold(true);
+        const int targetPixelSize = std::max(8, static_cast<int>(std::lround(size * 0.56)));
+        font.setPixelSize(targetPixelSize);
 
-        const auto &adjustFont = [](const QString &family,
-                                    int desiredSize) -> std::optional<QFont> {
-            int lastHeight = 0;
-
-            for (int i = 1; i < 100; i++) {
-                QFont font{family, i};
-                font.setBold(true);
-
-                int currentHeight = QFontMetrics{font}.height();
-                if (currentHeight == desiredSize ||
-                    lastHeight < desiredSize && currentHeight > desiredSize) [[unlikely]]
-                {
-                    LOG(Info,
-                        "Found a suitable font for the tray icon. "
-                        "Family: '{}', desiredSize: '{}', fontHeight: '{}', fontSize: '{}'",
-                        family, desiredSize, currentHeight, i);
-                    return font;
-                }
-                lastHeight = currentHeight;
-            }
-
-            LOG(Warn,
-                "Cannot find a suitable font for the tray icon. Family: '{}', desiredSize: "
-                "'{}'",
-                family, desiredSize);
-
-            return std::nullopt;
-        };
-
-        auto textHeight = size * 0.8;
-
-        if (!trayIconFonts.contains(textHeight)) {
-            trayIconFonts[textHeight] = adjustFont(qApp->font().family(), textHeight);
+        QFontMetrics metrics{font};
+        while (font.pixelSize() > 7 && metrics.horizontalAdvance(text) > size - 2) {
+            font.setPixelSize(font.pixelSize() - 1);
+            metrics = QFontMetrics{font};
         }
 
-        const auto &optFont = trayIconFonts[textHeight];
-        if (!optFont.has_value()) {
-            break;
-        }
-        const auto &font = optFont.value();
-        const auto &fontMetrics = QFontMetrics{font};
+        const qreal padX = std::max(1.5, size * 0.06);
+        const qreal badgeW = std::min<qreal>(size, metrics.horizontalAdvance(text) + padX * 2.0);
+        const qreal badgeH = std::min<qreal>(size, metrics.ascent() + std::max(2.0, size * 0.14));
+        const QRectF bgRect{size - badgeW, size - badgeH, badgeW, badgeH};
+        const qreal cornerRadius = std::min(bgRect.height() * 0.35, size * 0.18);
 
-        const auto textWidth = fontMetrics.width(text);
-        textHeight = fontMetrics.height();
+        // Semantic colour: Apple green when healthy, red only when low.
+        const QColor badgeColor = isLow ? Theme::Light().BatteryLow : Theme::Light().BatteryGood;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(badgeColor);
+        painter.drawRoundedRect(bgRect, cornerRadius, cornerRadius);
 
-        constexpr auto kMargin = QSizeF{2, 0};
-
-        const auto textRect = QRectF{
-            (double)size - textWidth - kMargin.width(), size - textHeight - kMargin.height(),
-            (double)textWidth, textHeight};
-        const auto bgRect = QRectF{
-            textRect.left() - kMargin.width(), textRect.top() - kMargin.height(),
-            textRect.width() + kMargin.width() * 2, textRect.height() + kMargin.height() * 2};
-
-        // The tray is Windows', not ours: the badge is one red in every mode, and the
-        // icon is not re-rendered when the mode changes.
         painter.setPen(Qt::white);
-        painter.setBrush(Theme::Light().BatteryLow);
         painter.setFont(font);
+        painter.drawText(bgRect, Qt::AlignCenter, text);
+        painter.restore();
+    }
 
-        painter.drawRoundedRect(bgRect, 10, 10);
-        painter.drawText(textRect, text);
-
-    } while (false);
-    painter.restore();
-
-    painter.save();
-    do {
-        if (!dot.has_value()) {
-            break;
-        }
-
-        const double dotDiameter = size * 0.4;
-
+    if (dot.has_value()) {
+        painter.save();
+        const qreal dotDiameter = std::max(4.0, size * 0.32);
+        painter.setPen(Qt::NoPen);
         painter.setBrush(dot.value());
-        painter.drawEllipse(QRectF{size - dotDiameter, 0, dotDiameter, dotDiameter});
-    } while (false);
-    painter.restore();
+        painter.drawEllipse(QRectF{size - dotDiameter - 0.5, 0.5, dotDiameter, dotDiameter});
+        painter.restore();
+    }
 
     return result;
 }
@@ -406,43 +611,17 @@ void TrayIcon::ExecuteTrayActivation(TrayActivationAction action)
 
 void TrayIcon::OnQuickConnectOutcome(Core::QuickConnect::Outcome outcome, const QString &deviceName)
 {
-    QString text;
-    QSystemTrayIcon::MessageIcon icon = QSystemTrayIcon::Information;
+    Q_UNUSED(deviceName);
 
-    switch (outcome) {
-    case Core::QuickConnect::Outcome::Disabled:
-        text = tr("Quick connection is disabled.");
-        break;
-    case Core::QuickConnect::Outcome::NoDevice:
-        text = tr("Choose a Bluetooth audio device in Settings first.");
-        icon = QSystemTrayIcon::Warning;
-        break;
-    case Core::QuickConnect::Outcome::DeviceUnavailable:
-        text = tr("The selected device is not available. Turn it on or bring it into range.");
-        icon = QSystemTrayIcon::Warning;
-        break;
-    case Core::QuickConnect::Outcome::AlreadyConnected:
-        text = tr("%1 is already connected.").arg(deviceName);
-        break;
-    case Core::QuickConnect::Outcome::RequestStarted:
-        text = tr("Connecting to %1...").arg(deviceName);
-        break;
-    case Core::QuickConnect::Outcome::Connected:
-        text = tr("%1 connected.").arg(deviceName);
-        break;
-    case Core::QuickConnect::Outcome::TimedOut:
-        text = tr("Connection to %1 timed out.").arg(deviceName);
-        icon = QSystemTrayIcon::Warning;
-        break;
-    case Core::QuickConnect::Outcome::Failed:
-        text = tr("Windows could not connect to %1.").arg(deviceName);
-        icon = QSystemTrayIcon::Warning;
-        break;
-    default:
-        return;
+    // Do not spam Windows balloon/toast notifications over the popup for routine connect,
+    // disconnect, or timeout outcomes -- the popup itself shows `"Connecting..."`, live
+    // battery/controls, and subtle inline status messages. Only notify when the user has not
+    // configured a Quick Connect device yet.
+    if (outcome == Core::QuickConnect::Outcome::NoDevice) {
+        ShowMessage(
+            tr("Quick connect"), tr("Choose a Bluetooth audio device in Settings first."),
+            QSystemTrayIcon::Warning);
     }
-
-    ShowMessage(tr("Quick connect"), text, icon);
 }
 
 void TrayIcon::OnTrayIconBatteryChanged(Core::Settings::TrayIconBatteryBehavior value)

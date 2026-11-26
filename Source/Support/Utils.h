@@ -8,7 +8,9 @@
 #include <vector>
 #include <cwctype>
 
+#include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QStandardPaths>
 
 #include "Source/Support/Helper.h"
@@ -75,9 +77,38 @@ namespace Text {
 
 namespace File {
 
+// Portable mode activates when `AirpodsBridge.ini` or a `portable` marker sits next to the
+// executable, keeping both settings and logs inside the application directory.
+inline QString GetPortableConfigPath()
+{
+    const auto appDir = QCoreApplication::applicationDirPath();
+    if (appDir.isEmpty()) {
+        return {};
+    }
+    return QDir{appDir}.absoluteFilePath(CONFIG_PROGRAM_NAME ".ini");
+}
+
+inline bool IsPortableMode()
+{
+    const auto appDir = QCoreApplication::applicationDirPath();
+    if (appDir.isEmpty()) {
+        return false;
+    }
+    const QDir dir{appDir};
+    return QFileInfo::exists(dir.absoluteFilePath(CONFIG_PROGRAM_NAME ".ini")) ||
+           QFileInfo::exists(dir.absoluteFilePath("portable")) ||
+           QFileInfo::exists(dir.absoluteFilePath(".portable"));
+}
+
 inline QDir GetWorkspace()
 {
-    auto location = QStandardPaths::writableLocation(QStandardPaths::DataLocation);
+    QString location;
+    if (IsPortableMode()) {
+        location = QDir{QCoreApplication::applicationDirPath()}.absoluteFilePath("Logs");
+    }
+    else {
+        location = QStandardPaths::writableLocation(QStandardPaths::DataLocation);
+    }
 
     QDir result{std::move(location)};
     if (!result.exists()) {
@@ -97,27 +128,6 @@ inline bool OpenFileLocation(const QDir &directory)
 } // namespace File
 
 namespace Process {
-//
-// Retained for backward compatibility with v0.2.0 and before.
-// TODO: Remove this function in [v1.0.0]
-//
-inline bool SingleInstance(const QString &instanceName)
-{
-#if !defined APB_OS_WIN
-    #error "Need to port."
-#endif
-    HANDLE mutex = CreateMutexW(
-        nullptr, false, ("Global\\" + instanceName + "_InstanceMutex").toStdWString().c_str());
-    uint32_t lastError = GetLastError();
-
-    if (mutex == nullptr) {
-        FatalError(std::format("Create instance mutex failed.\nErrorCode: {}", lastError), false);
-    }
-
-    // No need to close the handle
-    //
-    return lastError != ERROR_ALREADY_EXISTS;
-}
 
 inline void AttachConsole()
 {

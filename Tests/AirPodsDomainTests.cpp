@@ -26,7 +26,7 @@ using Core::AirPods::Model;
 using Core::AirPods::Side;
 using Core::AirPods::Details::Advertisement;
 using Core::AirPods::Details::StateManager;
-using ReceivedData = Core::Bluetooth::AdvertisementWatcher::ReceivedData;
+using ReceivedData = Core::Bluetooth::ReceivedAdvertisement;
 
 std::vector<uint8_t> MakePacket(
     uint16_t modelId, Side side, uint8_t leftBattery, uint8_t rightBattery, uint8_t caseBattery,
@@ -79,10 +79,15 @@ class AirPodsDomainTests : public QObject
 
 private Q_SLOTS:
     void RejectsMalformedPackets();
+    void ParsesCompoundContinuityTlvPackets();
     void RecognizesAirPodsMaxUsbC();
+    void RecognizesFullAirPodsAndBeatsCatalog();
     void ResolvesAirPodsMaxUsbCDisplayName();
     void ParsesAdvertisementState();
     void FiltersDuplicateAndWeakAdvertisements();
+    void AcceptsOneStepBatteryChangeAcrossAddressRotation();
+    void PreservesCaseFlagsFromLeftOnlyAdvertisement();
+    void ExpiresStaleStateDeterministically();
     void MergesAdvertisementsFromBothSides();
     void RejectsAdvertisementsFromDifferentModels();
     void AcceptsKnownModelAfterUnknownAdvertisement();
@@ -91,11 +96,14 @@ private Q_SLOTS:
     void PropagatesBehaviourOptions();
     void RejectsNullSettingsRepository();
     void ParsesUpdateVersions();
+    void SanitizesUpdateAssetFileNames();
     void ParsesGitHubReleaseMetadata();
     void RejectsReleaseMetadataFromAnotherRepository();
     void RejectsUpdateAssetsWithoutDigest();
     void VerifiesUpdateFileDigest();
     void PresentsMainWindowLifecycleStates();
+    void PresentsMainWindowConnectAndNoiseControl();
+    void PresentsMainWindowNearbyOtherDevice();
     void PresentsMainWindowDeviceState();
     void PresentsMainWindowCaseBattery();
     void ReadsOnePieceBatteryFromEitherSide();
@@ -117,12 +125,130 @@ void AirPodsDomainTests::RejectsMalformedPackets()
     packet = MakePacket(0x2014, Side::Left, 8, 7, 5);
     packet[1] = 24;
     QVERIFY(!Core::AppleCP::AirPods::IsValid(packet));
+
+    // Truncated TLV record declaring more bytes than remain in the buffer.
+    const std::vector<uint8_t> truncated{0x10, 0x20, 0x01, 0x02};
+    QVERIFY(!Core::AppleCP::AirPods::IsValid(truncated));
+}
+
+void AirPodsDomainTests::ParsesCompoundContinuityTlvPackets()
+{
+    // NearbyInfo (0x10, len 5) followed by ProximityPairing (0x07, len 25).
+    std::vector<uint8_t> compound{0x10, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05};
+    const auto proximity = MakePacket(0x2027, Side::Right, 9, 8, 6);
+    compound.insert(compound.end(), proximity.begin(), proximity.end());
+
+    const auto parsed = Core::AppleCP::AirPods::Parse(compound);
+    QVERIFY(parsed.has_value());
+    QCOMPARE(parsed->GetModel(), Model::AirPods_Pro_3);
+    QCOMPARE(parsed->GetLeftBattery().Value(), 9U);
+    QCOMPARE(parsed->GetRightBattery().Value(), 8U);
+    QCOMPARE(parsed->GetCaseBattery().Value(), 6U);
 }
 
 void AirPodsDomainTests::RecognizesAirPodsMaxUsbC()
 {
     QCOMPARE(Core::AppleCP::AirPods::GetModel(0x201F), Model::AirPods_Max_USB_C);
     QCOMPARE(Helper::ToString(Model::AirPods_Max_USB_C), QString{"AirPods Max (USB-C)"});
+}
+
+void AirPodsDomainTests::RecognizesFullAirPodsAndBeatsCatalog()
+{
+    using Core::AirPods::CapabilitiesFor;
+    using Core::AirPods::ModelFromModelNumber;
+    using Core::AirPods::ModelFromProductId;
+
+    // 2025/2026 AirPods & Beats Bluetooth PIDs
+    QCOMPARE(ModelFromProductId(0x2036), Model::AirPods_5);
+    QCOMPARE(ModelFromProductId(0x2030), Model::AirPods_5_WCC);
+    QCOMPARE(ModelFromProductId(0x202D), Model::AirPods_Max_2);
+    QCOMPARE(ModelFromProductId(0x2003), Model::Powerbeats_3);
+    QCOMPARE(ModelFromProductId(0x200D), Model::Powerbeats_4);
+    QCOMPARE(ModelFromProductId(0x200B), Model::Powerbeats_Pro);
+    QCOMPARE(ModelFromProductId(0x201D), Model::Powerbeats_Pro_2);
+    QCOMPARE(ModelFromProductId(0x202F), Model::Powerbeats_Fit);
+    QCOMPARE(ModelFromProductId(0x2005), Model::Beats_X);
+    QCOMPARE(ModelFromProductId(0x2010), Model::Beats_Flex);
+    QCOMPARE(ModelFromProductId(0x2006), Model::Beats_Solo3);
+    QCOMPARE(ModelFromProductId(0x200C), Model::Beats_Solo_Pro);
+    QCOMPARE(ModelFromProductId(0x2025), Model::Beats_Solo_4);
+    QCOMPARE(ModelFromProductId(0x2026), Model::Beats_Solo_Buds);
+    QCOMPARE(ModelFromProductId(0x2009), Model::Beats_Studio3);
+    QCOMPARE(ModelFromProductId(0x2017), Model::Beats_Studio_Pro);
+    QCOMPARE(ModelFromProductId(0x2011), Model::Beats_Studio_Buds);
+    QCOMPARE(ModelFromProductId(0x2016), Model::Beats_Studio_Buds_Plus);
+    QCOMPARE(ModelFromProductId(0x2038), Model::Beats_360);
+
+    // Apple 0x1D hardware model-number resolution
+    QCOMPARE(ModelFromModelNumber("A3531"), Model::AirPods_5);
+    QCOMPARE(ModelFromModelNumber("A3439"), Model::AirPods_5_WCC);
+    QCOMPARE(ModelFromModelNumber("A3454"), Model::AirPods_Max_2);
+    QCOMPARE(ModelFromModelNumber("A3063"), Model::AirPods_Pro_3);
+    QCOMPARE(ModelFromModelNumber("a3157 "), Model::Powerbeats_Pro_2);
+    QCOMPARE(ModelFromModelNumber("A2924"), Model::Beats_Studio_Pro);
+    QCOMPARE(ModelFromModelNumber("A3140"), Model::Beats_Solo_4);
+    QCOMPARE(ModelFromModelNumber("A2871"), Model::Beats_Studio_Buds_Plus);
+    QCOMPARE(ModelFromModelNumber("A9999"), Model::Unknown);
+
+    // Key capabilities
+    const auto pbp2 = CapabilitiesFor(Model::Powerbeats_Pro_2);
+    QVERIFY(!pbp2.isOnePiece);
+    QVERIFY(pbp2.supportsNoiseCancellation);
+    QVERIFY(pbp2.supportsAdaptiveAudio);
+    QVERIFY(pbp2.supportsHeartRate);
+
+    const auto ap5 = CapabilitiesFor(Model::AirPods_5);
+    QVERIFY(!ap5.isOnePiece);
+    QVERIFY(ap5.supportsNoiseCancellation);
+    QVERIFY(ap5.supportsAdaptiveAudio);
+    QVERIFY(ap5.supportsAllowOffMode);
+
+    const auto max2 = CapabilitiesFor(Model::AirPods_Max_2);
+    QVERIFY(max2.isOnePiece);
+    QVERIFY(max2.supportsAdaptiveAudio);
+    QVERIFY(max2.supportsConversationalAwareness);
+
+    const auto studioPro = CapabilitiesFor(Model::Beats_Studio_Pro);
+    QVERIFY(studioPro.isOnePiece);
+    QVERIFY(studioPro.supportsNoiseCancellation);
+    QVERIFY(studioPro.supportsTransparency);
+
+    const auto beats360 = CapabilitiesFor(Model::Beats_360);
+    QVERIFY(beats360.isOnePiece);
+    QVERIFY(beats360.supportsAdaptiveAudio);
+
+    // Popup Heart Rate bar presentation honors setting toggle and model capability
+    Gui::MainWindowViewModel vm;
+    Core::AirPods::State hrState;
+    hrState.model = Model::Powerbeats_Pro_2;
+    hrState.displayName = QStringLiteral("Powerbeats Pro 2");
+    hrState.pods.left.battery = 85;
+    hrState.noiseControl.controllable = true;
+    hrState.noiseControl.activeMode = Core::AirPods::NoiseControlMode::NoiseCancellation;
+    hrState.noiseControl.heartRateMonitoringEnabled = true;
+    hrState.noiseControl.heartRateStatus = Core::AirPods::HeartRateStatus::Live;
+    hrState.noiseControl.heartRateBpm = 78;
+    vm.UpdateState(hrState);
+
+    auto pres = vm.Present();
+    QVERIFY(pres.heartRate.visible);
+    QCOMPARE(pres.heartRate.bpm, std::optional<uint16_t>{78});
+    QVERIFY(!pres.statusBadge.contains("BPM"));
+
+    vm.SetShowHeartRateInPopup(false);
+    pres = vm.Present();
+    QVERIFY(!pres.heartRate.visible);
+    QVERIFY(pres.statusBadge.contains("78 BPM"));
+
+    // Updating state before first battery frame arrives never shows a blank void.
+    Core::AirPods::State earlyState;
+    earlyState.model = Model::AirPods_Pro_3;
+    earlyState.displayName = QStringLiteral("AirPods Pro");
+    earlyState.noiseControl.controllable = true;
+    vm.UpdateState(earlyState);
+    const auto earlyPres = vm.Present();
+    QVERIFY(!earlyPres.leftBattery.visible);
+    QCOMPARE(earlyPres.statusBadge, QStringLiteral("Connected"));
 }
 
 void AirPodsDomainTests::ResolvesAirPodsMaxUsbCDisplayName()
@@ -173,6 +299,77 @@ void AirPodsDomainTests::FiltersDuplicateAndWeakAdvertisements()
         Advertisement{MakeAdvertisementData(0x1234, -90, Side::Left, 7, 7, 5)});
     QVERIFY(!weak.has_value());
     QCOMPARE(manager.GetCurrentState()->pods.left.battery.Value(), 80U);
+}
+
+void AirPodsDomainTests::AcceptsOneStepBatteryChangeAcrossAddressRotation()
+{
+    StateManager manager;
+    manager.OnRssiMinChanged(-80);
+
+    // Initial advertisement at 80% / 70% / 50% from address 0x1111.
+    QVERIFY(
+        manager
+            .OnAdvReceived(Advertisement{MakeAdvertisementData(0x1111, -45, Side::Left, 8, 7, 5)})
+            .has_value());
+
+    // Random address rotates to 0x2222 while left drops one 10% step (80% -> 70%).
+    const auto rotated = manager.OnAdvReceived(
+        Advertisement{MakeAdvertisementData(0x2222, -48, Side::Left, 7, 7, 5)});
+    QVERIFY(rotated.has_value());
+    QCOMPARE(rotated->newState.pods.left.battery.Value(), 70U);
+
+    // Another address with a 30% jump is likely a neighbor's device and must be rejected.
+    const auto neighbor = manager.OnAdvReceived(
+        Advertisement{MakeAdvertisementData(0x3333, -49, Side::Left, 4, 7, 5)});
+    QVERIFY(!neighbor.has_value());
+    QCOMPARE(manager.GetCurrentState()->pods.left.battery.Value(), 70U);
+}
+
+void AirPodsDomainTests::PreservesCaseFlagsFromLeftOnlyAdvertisement()
+{
+    StateManager manager;
+    manager.OnRssiMinChanged(-80);
+
+    // Only the left bud broadcasts; case battery nibble is 0xF (unavailable), while lid is open.
+    ReceivedData leftOnly;
+    leftOnly.address = 0x1234;
+    leftOnly.rssi = -45;
+    leftOnly.manufacturerDataMap.emplace(
+        Core::AppleCP::VendorId, MakePacket(0x2014, Side::Left, 8, 7, 0x0F, true, true));
+
+    const auto update = manager.OnAdvReceived(Advertisement{leftOnly});
+    QVERIFY(update.has_value());
+    QVERIFY(!update->newState.caseBox.battery.Available());
+    QVERIFY(update->newState.caseBox.isLidOpened);
+    QVERIFY(update->newState.caseBox.isBothPodsInCase);
+}
+
+void AirPodsDomainTests::ExpiresStaleStateDeterministically()
+{
+    using namespace std::chrono_literals;
+
+    StateManager manager;
+    manager.OnRssiMinChanged(-80);
+    bool discarded = false;
+    manager.SetOnDiscardState([&] { discarded = true; });
+
+    const auto t0 = StateManager::Clock::now();
+    QVERIFY(!manager.NextExpiry(t0).has_value());
+
+    QVERIFY(manager.OnAdvReceived(Advertisement{MakeAdvertisementData(0x1111, -45, Side::Left)}, t0)
+                .has_value());
+    QVERIFY(manager.NextExpiry(t0).has_value());
+
+    // Halfway through timeout: still alive.
+    QVERIFY(!manager.ExpireStale(t0 + 5s));
+    QVERIFY(!discarded);
+    QVERIFY(manager.GetCurrentState().has_value());
+
+    // Past timeout: state discarded and callback invoked.
+    QVERIFY(manager.ExpireStale(t0 + StateManager::kStateTimeout));
+    QVERIFY(discarded);
+    QVERIFY(!manager.GetCurrentState().has_value());
+    QVERIFY(!manager.NextExpiry(t0 + StateManager::kStateTimeout).has_value());
 }
 
 void AirPodsDomainTests::MergesAdvertisementsFromBothSides()
@@ -297,6 +494,7 @@ void AirPodsDomainTests::PropagatesBehaviourOptions()
     const auto defaults = Core::Settings::GetCurrent();
     QVERIFY(defaults.check_for_updates);
     QVERIFY(defaults.show_popup_on_lid_open);
+    QVERIFY(defaults.show_nearby_popup_when_disconnected);
     QVERIFY(defaults.ear_detection_resume_playback);
 
     bool checkForUpdates = false;
@@ -362,6 +560,19 @@ void AirPodsDomainTests::ParsesUpdateVersions()
 {
     QCOMPARE(Core::Update::ToVersionNumber("v0.5.0"), QVersionNumber(0, 5, 0));
     QCOMPARE(Core::Update::ToVersionNumber("0.5.0"), QVersionNumber(0, 5, 0));
+}
+
+void AirPodsDomainTests::SanitizesUpdateAssetFileNames()
+{
+    QCOMPARE(
+        Core::Update::Details::SanitizeAssetFileName("AirpodsBridge-1.1.0-win32.exe"),
+        QString{"AirpodsBridge-1.1.0-win32.exe"});
+    QCOMPARE(
+        Core::Update::Details::SanitizeAssetFileName("../../evil/AirpodsBridge-1.1.0-win32.exe"),
+        QString{"AirpodsBridge-1.1.0-win32.exe"});
+    QCOMPARE(Core::Update::Details::SanitizeAssetFileName("..\\..\\evil.exe"), QString{"evil.exe"});
+    QVERIFY(Core::Update::Details::SanitizeAssetFileName("..").isEmpty());
+    QVERIFY(Core::Update::Details::SanitizeAssetFileName(".").isEmpty());
 }
 
 void AirPodsDomainTests::ParsesGitHubReleaseMetadata()
@@ -491,6 +702,158 @@ void AirPodsDomainTests::PresentsMainWindowLifecycleStates()
 
     viewModel.Bind();
     QCOMPARE(viewModel.Present().title, QString{"Disconnected"});
+}
+
+void AirPodsDomainTests::PresentsMainWindowConnectAndNoiseControl()
+{
+    Gui::MainWindowViewModel viewModel;
+    viewModel.Available();
+    viewModel.Bind();
+    viewModel.SetQuickConnectAvailable(true);
+
+    // Bound and disconnected with Quick Connect ready shows a Connect button.
+    auto presentation = viewModel.Present();
+    QCOMPARE(presentation.title, QString{"Disconnected"});
+    QCOMPARE(presentation.buttonAction, Gui::ButtonAction::Connect);
+    QVERIFY(!presentation.noiseControl.visible);
+
+    // BLE-only connected AirPods Pro 3: no noise-control bar yet.
+    Core::AirPods::State state;
+    state.displayName = "AirPods Pro 3";
+    state.model = Model::AirPods_Pro_3;
+    state.pods.left.battery = 80;
+    state.pods.right.battery = 75;
+    viewModel.UpdateState(state);
+    presentation = viewModel.Present();
+    QCOMPARE(presentation.buttonAction, Gui::ButtonAction::NoButton);
+    QVERIFY(!presentation.noiseControl.visible);
+    QVERIFY(presentation.statusBadge.isEmpty());
+
+    // AAP-connected AirPods Pro 3: reveals Noise Control with Adaptive support + quick pills.
+    state.noiseControl.controllable = true;
+    state.noiseControl.activeMode = Core::AirPods::NoiseControlMode::NoiseCancellation;
+    state.noiseControl.conversationalAwareness = true;
+    state.noiseControl.conversationalAwarenessSpeaking = true;
+    state.noiseControl.hearingAidEnabled = true;
+    state.noiseControl.heartRateBpm = 74;
+    state.audioProfile = Core::AirPods::AudioProfile::HandsFree;
+    viewModel.UpdateState(state);
+    presentation = viewModel.Present();
+    QVERIFY(presentation.noiseControl.visible);
+    QCOMPARE(
+        presentation.noiseControl.activeMode, Core::AirPods::NoiseControlMode::NoiseCancellation);
+    QVERIFY(presentation.noiseControl.supportsAdaptive);
+    QVERIFY(presentation.noiseControl.supportsConversationalAwareness);
+    QVERIFY(presentation.noiseControl.conversationalAwareness);
+    QVERIFY(presentation.noiseControl.conversationalAwarenessSpeaking);
+    QVERIFY(presentation.noiseControl.supportsHearingAid);
+    QVERIFY(presentation.noiseControl.hearingAidEnabled);
+    QCOMPARE(presentation.noiseControl.heartRateBpm.value_or(0), uint16_t{74});
+    QVERIFY(presentation.heartRate.visible);
+    QCOMPARE(presentation.heartRate.bpm.value_or(0), uint16_t{74});
+    QCOMPARE(presentation.statusBadge, QStringLiteral("Hands-Free Audio"));
+
+    // Turning off the dedicated popup Heart Rate bar moves BPM into the status badge.
+    viewModel.SetShowHeartRateInPopup(false);
+    presentation = viewModel.Present();
+    QVERIFY(!presentation.heartRate.visible);
+    QCOMPARE(
+        presentation.statusBadge,
+        QStringLiteral("%1 74 BPM %2 Hands-Free Audio").arg(QChar{0x2665}, QChar{0x00B7}));
+    viewModel.SetShowHeartRateInPopup(true);
+
+    // Non-ANC model (AirPods 2) never shows noise control even if transport flags controllable.
+    state.model = Model::AirPods_2;
+    viewModel.UpdateState(state);
+    QVERIFY(!viewModel.Present().noiseControl.visible);
+}
+
+void AirPodsDomainTests::PresentsMainWindowNearbyOtherDevice()
+{
+    Gui::MainWindowViewModel viewModel;
+    viewModel.Available();
+    viewModel.Bind();
+    viewModel.SetQuickConnectAvailable(true);
+
+    Core::AirPods::State nearby;
+    nearby.displayName = QStringLiteral("AirPods Pro 3");
+    nearby.model = Model::AirPods_Pro_3;
+    nearby.isNearbyOtherDevice = true;
+    nearby.pods.left.battery = 90;
+    nearby.pods.right.battery = 85;
+    nearby.caseBox.battery = 60;
+    nearby.caseBox.isLidOpened = false;
+
+    viewModel.UpdateNearbyState(nearby);
+    auto presentation = viewModel.Present();
+    QVERIFY(presentation.isNearby);
+    QCOMPARE(presentation.title, QStringLiteral("AirPods Pro 3"));
+    QCOMPARE(presentation.statusBadge, QStringLiteral("Connected to another device"));
+    QCOMPARE(presentation.buttonAction, Gui::ButtonAction::Connect);
+    QVERIFY(presentation.artwork.has_value());
+    QVERIFY(presentation.leftBattery.visible);
+    QCOMPARE(presentation.leftBattery.value, 90U);
+    QVERIFY(presentation.rightBattery.visible);
+    QCOMPARE(presentation.rightBattery.value, 85U);
+    QVERIFY(presentation.caseBattery.visible);
+    QCOMPARE(presentation.caseBattery.value, 60U);
+
+    // Lid-open nearby broadcast updates the badge cleanly.
+    nearby.caseBox.isLidOpened = true;
+    viewModel.UpdateNearbyState(nearby);
+    QCOMPARE(viewModel.Present().statusBadge, QStringLiteral("Nearby \u00B7 Case open"));
+
+    // Connecting indicator switches button state until connected or cleared.
+    viewModel.SetConnecting(true);
+    QVERIFY(viewModel.Present().connecting);
+    viewModel.SetConnecting(false);
+    QVERIFY(!viewModel.Present().connecting);
+
+    // Inline transient status shows cleanly without requiring a Windows notification.
+    viewModel.SetTransientStatus(QStringLiteral("Open case to connect"));
+    QCOMPARE(viewModel.Present().statusBadge, QStringLiteral("Open case to connect"));
+    viewModel.SetTransientStatus({});
+
+    // Controllable state without any battery or mode reading must not show empty ANC controls.
+    Gui::MainWindowViewModel emptyVm;
+    Core::AirPods::State emptyState;
+    emptyState.model = Model::AirPods_Pro_3;
+    emptyState.noiseControl.controllable = true;
+    emptyVm.UpdateState(emptyState);
+    QVERIFY(!emptyVm.Present().noiseControl.visible);
+
+    // Closed case with both buds inside uses the dedicated in-case badge.
+    nearby.caseBox.isLidOpened = false;
+    nearby.caseBox.isBothPodsInCase = true;
+    viewModel.UpdateNearbyState(nearby);
+    QCOMPARE(viewModel.Present().statusBadge, QStringLiteral("In case \u00B7 Nearby"));
+
+    // Lid-open counter low 3 bits decode accurately from Continuity byte 8.
+    auto pkt = MakePacket(0x2027, Side::Left, 9, 8, 6, true, true);
+    pkt[8] = 0x05; // lid open (bit 3 == 0), counter == 5
+    const auto parsed = Core::AppleCP::AirPods::Parse(pkt);
+    QVERIFY(parsed.has_value());
+    QVERIFY(parsed->IsLidOpened());
+    QCOMPARE(parsed->GetLidOpenCounter(), uint8_t{5});
+
+    // Active connected state takes priority and cannot be clobbered by a nearby broadcast.
+    Core::AirPods::State connected = nearby;
+    connected.isNearbyOtherDevice = false;
+    viewModel.UpdateState(connected);
+    QVERIFY(!viewModel.Present().isNearby);
+
+    nearby.pods.left.battery = 10;
+    viewModel.UpdateNearbyState(nearby);
+    QVERIFY(!viewModel.Present().isNearby);
+    QCOMPARE(viewModel.Present().leftBattery.value, 90U);
+
+    // Clearing nearby after disconnect returns cleanly to Disconnected.
+    viewModel.Disconnect();
+    viewModel.UpdateNearbyState(nearby);
+    QVERIFY(viewModel.Present().isNearby);
+    viewModel.ClearNearby();
+    QVERIFY(!viewModel.Present().isNearby);
+    QCOMPARE(viewModel.Present().buttonAction, Gui::ButtonAction::Connect);
 }
 
 void AirPodsDomainTests::PresentsMainWindowDeviceState()

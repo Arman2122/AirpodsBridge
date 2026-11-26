@@ -6,31 +6,32 @@
 #include <cstdint>
 #include <vector>
 
-#include "Source/Core/Bluetooth.h"
 #include "Source/Domain/AirPodsState.h"
 #include "Source/Domain/AppleCP.h"
+#include "Source/Domain/BluetoothTypes.h"
 
 namespace Core::AirPods::Details {
 
 //
 // A single decoded proximity-pairing advertisement.
 //
-// Only the `ReceivedData` value type is borrowed from the Bluetooth layer; nothing here
-// starts a scan or touches the platform, which keeps the decode path unit-testable.
+// Operates strictly on `Bluetooth::ReceivedAdvertisement` value data from `apb_domain`,
+// keeping the entire decode pipeline free of platform or core dependencies.
 //
 class Advertisement
 {
 public:
-    using AddressType = decltype(Bluetooth::AdvertisementWatcher::ReceivedData::address);
-    using TimestampType = decltype(Bluetooth::AdvertisementWatcher::ReceivedData::timestamp);
+    using AddressType = decltype(Bluetooth::ReceivedAdvertisement::address);
+    using TimestampType = Bluetooth::ReceivedAdvertisement::Timestamp;
 
     struct AdvState : AirPods::State {
-        Side side;
+        Side side{Side::Left};
+        uint8_t lidOpenCounter{0};
     };
 
-    static bool IsDesiredAdv(const Bluetooth::AdvertisementWatcher::ReceivedData &data);
+    static bool IsDesiredAdv(const Bluetooth::ReceivedAdvertisement &data);
 
-    Advertisement(const Bluetooth::AdvertisementWatcher::ReceivedData &data);
+    explicit Advertisement(const Bluetooth::ReceivedAdvertisement &data);
 
     int16_t GetRssi() const;
     const TimestampType &GetTimestamp() const;
@@ -39,7 +40,7 @@ public:
     const AdvState &GetAdvState() const;
 
 private:
-    Bluetooth::AdvertisementWatcher::ReceivedData _data;
+    Bluetooth::ReceivedAdvertisement _data;
     AppleCP::AirPods _protocol;
     AdvState _state;
 

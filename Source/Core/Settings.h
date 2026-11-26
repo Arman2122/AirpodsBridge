@@ -50,6 +50,7 @@ void SetRepository(std::unique_ptr<Repository> repository);
     callback(bool, reduce_loud_sounds, {false}, Impl::Deprecated())                                \
     callback(uint32_t, loud_volume_level, {40}, Impl::Deprecated())                                \
     callback(uint64_t, device_address, {0}, Impl::Sensitive{})                                     \
+    callback(QString, bound_device_name, {}, Impl::Sensitive{})                                    \
     callback(TrayIconBatteryBehavior, tray_icon_battery, {TrayIconBatteryBehavior::Disable},       \
         Impl::Desc{QObject::tr("Shows the lowest battery of the two AirPods as a number on the tray icon.")}) \
     callback(bool, tray_quick_connect_enabled, {false},                                            \
@@ -58,9 +59,13 @@ void SetRepository(std::unique_ptr<Repository> repository);
     callback(TaskbarStatusBehavior, battery_on_taskbar, {TaskbarStatusBehavior::Disable},          \
         Impl::Desc{QObject::tr("Shows the lowest battery on the taskbar, as text or as a small icon.")}) \
     callback(bool, check_for_updates, {true},                                                      \
-        Impl::Desc{QObject::tr("Looks for a new release on GitHub about once an hour. Nothing is downloaded or installed without asking first.")}) \
+        Impl::Desc{QObject::tr("Checks GitHub Releases periodically for a new version. Nothing is downloaded or installed without asking first.")}) \
     callback(bool, show_popup_on_lid_open, {true},                                                 \
         Impl::Desc{QObject::tr("Opens the battery popup when the case lid is opened, the way an iPhone does.")}) \
+    callback(bool, show_nearby_popup_when_disconnected, {true},                                    \
+        Impl::Desc{QObject::tr("Shows an iPhone-style nearby popup with live battery and a one-click Connect button even when your AirPods are connected to another device.")}) \
+    callback(bool, show_heart_rate_in_popup, {true},                                               \
+        Impl::Desc{QObject::tr("Shows a compact live Apple Health Heart Rate bar inside the battery popup for AirPods Pro 3 and Powerbeats Pro 2.")}) \
     callback(bool, ear_detection_resume_playback, {true},                                          \
         Impl::Desc{QObject::tr("Also resumes media when your AirPods are back in your ears. Turn this off to only ever pause.")}) \
     callback(bool, ear_detection_single_bud, {false},                                              \
@@ -71,8 +76,38 @@ void SetRepository(std::unique_ptr<Repository> repository);
         Impl::Desc{QObject::tr("Shows a notification when an AirPod or the case drops to the level below. Once per drop.")}) \
     callback(uint32_t, low_battery_threshold, {20},                                                \
         Impl::Desc{QObject::tr("What counts as low, for the notification and for the tray icon's \"when low\" option.")}) \
+    callback(bool, full_charge_notification, {false},                                              \
+        Impl::Desc{QObject::tr("Shows a notification once your AirPods finish charging to 100%.")}) \
     callback(bool, auto_connect_on_lid_open, {false},                                              \
-        Impl::Desc{QObject::tr("Connects the quick connect device when its case opens near this computer. Keeps Bluetooth scanning on while disconnected, which uses a little more power.")})     callback(Appearance, appearance, {Appearance::System},                                                 Impl::Desc{QObject::tr("Light or dark. System follows the mode Windows is set to, and changes with it.")})
+        Impl::Desc{QObject::tr("Connects the quick connect device when its case opens near this computer. Keeps Bluetooth scanning on while disconnected, which uses a little more power.")}) \
+    callback(QString, preferred_mic_device_id, {}, Impl::Sensitive{},                              \
+        Impl::Desc{QObject::tr("Keeps Windows' default microphone on a desktop mic so games and calls do not switch AirPods into muffled Hands-Free audio.")}) \
+    callback(bool, auto_switch_audio_on_connect, {true},                                           \
+        Impl::Desc{QObject::tr("Automatically switches Windows playback to your AirPods when they connect and restores your previous output device when they disconnect.")}) \
+    callback(bool, smart_audio_routing, {false},                                                   \
+        Impl::Desc{QObject::tr("Switches Windows playback to your AirPods when put in your ears and restores your previous output when taken out.")}) \
+    callback(bool, volume_cap_enabled, {false},                                                    \
+        Impl::Desc{QObject::tr("Limits AirPods playback volume when they connect so audio never starts unexpectedly loud.")}) \
+    callback(uint32_t, volume_cap_level, {80},                                                     \
+        Impl::Desc{QObject::tr("Maximum playback volume applied when AirPods connect.")})          \
+    callback(bool, audio_keep_alive, {false},                                                      \
+        Impl::Desc{QObject::tr("Locks the AirPods Windows audio engine to its 3 ms minimum period and keeps the stream awake while worn so game sounds, clicks, and notifications start with minimal delay.")}) \
+    callback(QString, hotkey_toggle_connect, {},                                                   \
+        Impl::Desc{QObject::tr("Global shortcut to connect or disconnect your AirPods from any app.")}) \
+    callback(QString, hotkey_toggle_popup, {},                                                     \
+        Impl::Desc{QObject::tr("Global shortcut to open or hide the battery popup.")})             \
+    callback(QString, hotkey_cycle_noise_control, {},                                              \
+        Impl::Desc{QObject::tr("Global shortcut to cycle Noise Control modes when two-way AAP control is active.")}) \
+    callback(bool, native_toast_notifications, {true},                                             \
+        Impl::Desc{QObject::tr("Uses Windows toast notifications when installed. Portable mode always uses tray alerts.")}) \
+    callback(bool, radio_service_low_latency_qos, {true},                                          \
+        Impl::Desc{QObject::tr("Upgrades AirPods ACL links to Guaranteed 3.75 ms QoS, clamps Sniff sleep intervals, and caps retransmit flush timeout to 40 ms via the Radio Service.")}) \
+    callback(bool, radio_service_hfp_decline, {false},                                             \
+        Impl::Desc{QObject::tr("Declines AirPods Hands-Free RFCOMM links at the Bluetooth HCI layer so games and calls never drop stereo playback into muffled mono.")}) \
+    callback(bool, radio_service_virtual_mic, {false},                                             \
+        Impl::Desc{QObject::tr("Exposes a stereo-safe virtual USB Audio Class 1.0 microphone via the Radio Service and Windows' built-in usbaudio driver.")}) \
+    callback(Appearance, appearance, {Appearance::System},                                         \
+        Impl::Desc{QObject::tr("Light or dark. System follows the mode Windows is set to, and changes with it.")})
 // clang-format on
 
 struct Fields {
@@ -209,7 +244,7 @@ struct MetaFields {
 #define DECLARE_META_FIELD(type, name, dft, ...)                                                   \
     Impl::MetaField<type Fields::*> name{TO_STRING(name), &Fields::name, __VA_ARGS__};
     SETTINGS_FIELDS(DECLARE_META_FIELD)
-#undef DECLARE_FIELD
+#undef DECLARE_META_FIELD
 };
 
 inline const auto &GetConstMetaFields()

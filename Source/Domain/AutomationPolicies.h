@@ -67,7 +67,7 @@ private:
 
 //////////////////////////////////////////////////
 
-enum class BatteryComponent : uint32_t { Left, Right, Case };
+enum class BatteryComponent : uint32_t { Left, Right, Case, Device };
 
 struct BatteryAlert {
     BatteryComponent component;
@@ -100,7 +100,7 @@ public:
     void Reset();
 
 private:
-    std::array<bool, 3> _alerted{};
+    std::array<bool, 4> _alerted{};
 };
 
 //////////////////////////////////////////////////
@@ -117,11 +117,62 @@ public:
     using Clock = std::chrono::steady_clock;
 
     static constexpr std::chrono::seconds kCooldown{30};
+    static constexpr std::chrono::seconds kPostDisconnectCooldown{12};
 
     bool OnLidOpenedNearby(bool deviceConnected, bool enabled, Clock::time_point now);
+    void OnDeviceDisconnected(bool enabled, Clock::time_point now);
+    void Reset();
 
 private:
     std::optional<Clock::time_point> _lastAttempt;
+    std::optional<Clock::time_point> _disconnectedUntil;
+};
+
+//////////////////////////////////////////////////
+
+//
+// One-shot full-charge notification.
+//
+// Alerts once when the AirPods (both buds when present, or the single unit for one-piece
+// headsets) reach 100% while charging. Re-arms only after dropping below `kRearmThreshold`
+// so a bud fluctuating between 99% and 100% in the case never spams notifications.
+//
+class FullChargeAlertPolicy
+{
+public:
+    static constexpr uint32_t kFullLevel = 100;
+    static constexpr uint32_t kRearmThreshold = 90;
+
+    bool OnStateChanged(const AirPods::State &state, bool enabled);
+    void Reset();
+
+private:
+    bool _armed{false};
+    bool _alerted{false};
+};
+
+//////////////////////////////////////////////////
+
+enum class AudioRouteAction : uint32_t { None, SwitchToAirPods, RestorePrevious };
+
+//
+// Smart default playback output routing based on wear state.
+//
+// Only acts on genuine transitions once enabled: putting AirPods in switches Windows'
+// default output to AirPods Stereo; taking them out or disconnecting restores the user's
+// previous speakers/interface.
+//
+class SmartAudioRoutePolicy
+{
+public:
+    AudioRouteAction OnStateChanged(
+        const std::optional<AirPods::State> &previous, const AirPods::State &current, bool enabled,
+        bool singleBud);
+    AudioRouteAction OnDisconnected(bool enabled);
+    void Reset();
+
+private:
+    bool _routedToAirPods{false};
 };
 
 } // namespace Core::Automation

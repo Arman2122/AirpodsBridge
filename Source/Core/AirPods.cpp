@@ -4,33 +4,124 @@
 #include "Source/Core/AirPods.h"
 
 #include <algorithm>
+#include <chrono>
+#include <format>
 #include <utility>
 
+#include "Source/Domain/AapProtocol.h"
 #include "Source/Support/Error.h"
 #include "Source/Support/Helper.h"
 #include "Source/Support/Logger.h"
 
 namespace Core::AirPods {
 
-Manager::Manager(QObject *parent) : QObject{parent}
+namespace {
+
+void LogDecodedAapMessage(const Aap::InboundMessage &msg)
 {
+    std::visit(
+        Helper::Overloaded{
+            [](const Aap::BatteryNotification &b) {
+                std::string summary;
+                for (const auto &e : b.entries) {
+                    if (!summary.empty()) {
+                        summary += ", ";
+                    }
+                    const char *comp = e.component == Aap::ComponentType::Left    ? "L"
+                                       : e.component == Aap::ComponentType::Right ? "R"
+                                       : e.component == Aap::ComponentType::Case  ? "Case"
+                                                                                  : "Single";
+                    if (e.status == Aap::ChargeStatus::Disconnected) {
+                        summary += std::format("{}=off", comp);
+                    }
+                    else {
+                        summary += std::format(
+                            "{}={}%{}", comp, e.level,
+                            e.status == Aap::ChargeStatus::Charging ? "+" : "");
+                    }
+                }
+                LOG(Info, "AAP exact battery (1%): {}", summary);
+            },
+            [](const Aap::EarDetectionNotification &e) {
+                LOG(Info, "AAP ear detection: primary={}, secondary={}",
+                    static_cast<int>(e.primary), static_cast<int>(e.secondary));
+            },
+            [](const Aap::NoiseControlNotification &n) {
+                LOG(Info, "AAP listening mode: {}", Helper::ToString(n.mode));
+            },
+            [](const Aap::ConversationalAwarenessNotification &ca) {
+                LOG(Info, "AAP conversation awareness: {}", ca.enabled);
+            },
+            [](const Aap::ConversationalAwarenessSpeechNotification &speech) {
+                LOG(Info, "AAP conversation speech: level={}, speaking={}", speech.level,
+                    speech.speaking);
+            },
+            [](const Aap::HeartRateNotification &hr) {
+                const int confPct = (static_cast<int>(hr.confidence) * 100 + 127) / 255;
+                LOG(Info, "AAP optical heart rate: {} BPM (confidence {}%)", hr.bpm, confPct);
+            },
+            [](const Aap::MetadataNotification &m) {
+                LOG(Info, "AAP metadata: name='{}' model='{}' fw='{}'", m.deviceName.toStdString(),
+                    m.modelNumber.toStdString(), m.firmwareVersion.toStdString());
+            },
+            [](const auto &) {},
+        },
+        msg);
+}
+
+bool IsRtBuddyFrame(std::span<const uint8_t> packet)
+{
+    return packet.size() >= 6 && packet[0] == 0x04 && packet[1] == 0x00 && packet[2] == 0x04 &&
+           packet[3] == 0x00 && packet[4] == 0x17 && packet[5] == 0x00;
+}
+
+} // namespace
+
+Manager::Manager(QObject *parent, std::unique_ptr<ControlTransport> controlTransport)
+    : QObject{parent},
+      _controlTransport{
+          controlTransport ? std::move(controlTransport) : std::make_unique<NullControlTransport>()}
+{
+    _expiryTimer.setSingleShot(true);
+    connect(&_expiryTimer, &QTimer::timeout, this, &Manager::OnExpiryTimeout);
+
+    _heartRateWatchdog.setSingleShot(true);
+    connect(&_heartRateWatchdog, &QTimer::timeout, this, &Manager::OnHeartRateWatchdogTimeout);
+
+    _convSpeechSafetyTimer.setSingleShot(true);
+    connect(
+        &_convSpeechSafetyTimer, &QTimer::timeout, this,
+        &Manager::OnConversationSpeechSafetyTimeout);
+
     _stateMgr.SetOnDiscardState([this] {
         QMetaObject::invokeMethod(this, [this] { emit Disconnected(); }, Qt::QueuedConnection);
     });
 
-    _adWatcher.CbReceived() += [this](auto &&...args) {
-        std::lock_guard<std::mutex> lock{_mutex};
-        OnAdvertisementReceived(std::forward<decltype(args)>(args)...);
-    };
+    _controlTransport->SetOnConnectionChanged(
+        [this](bool connected) { OnControlConnectionChanged(connected); });
+    _controlTransport->SetOnPacketReceived(
+        [this](std::vector<uint8_t> packet) { OnControlPacketReceived(packet); });
 
-    _adWatcher.CbStateChanged() += [this](auto &&...args) {
-        std::lock_guard<std::mutex> lock{_mutex};
-        OnAdvWatcherStateChanged(std::forward<decltype(args)>(args)...);
-    };
+    // Callbacks acquire `_mutex` internally and ALWAYS release it before emitting signals.
+    _adWatcher.CbReceived() +=
+        [this](auto &&...args) { OnAdvertisementReceived(std::forward<decltype(args)>(args)...); };
+
+    _adWatcher.CbStateChanged() +=
+        [this](auto &&...args) { OnAdvWatcherStateChanged(std::forward<decltype(args)>(args)...); };
 }
 
 Manager::~Manager()
 {
+    _expiryTimer.stop();
+    _heartRateWatchdog.stop();
+    _convSpeechSafetyTimer.stop();
+    if (_heartRateWanted && _aapConnected && _controlTransport->IsConnected()) {
+        StopHeartRateWire();
+    }
+    _controlTransport->SetOnPacketReceived({});
+    _controlTransport->SetOnConnectionChanged({});
+    _controlTransport->Disconnect();
+
     StopScanner();
 
     _deviceLookupThread.request_stop();
@@ -41,7 +132,18 @@ Manager::~Manager()
 
 bool Manager::ShouldScan() const
 {
-    return _boundDevice.has_value() && (_deviceConnected || _scanWhileDisconnected);
+    if (_systemSuspended) {
+        return false;
+    }
+    // When an AAP control link is live, battery, ear detection and listening mode arrive
+    // as push notifications over ACL/L2CAP, so BLE scanning can rest at 0% CPU.
+    if (_aapConnected) {
+        return false;
+    }
+    if (_deviceConnected) {
+        return _boundDevice.has_value();
+    }
+    return _scanWhileDisconnected || _showNearbyWhenDisconnected;
 }
 
 void Manager::ReconcileScannerLater()
@@ -66,13 +168,66 @@ void Manager::ReconcileScannerLater()
         Qt::QueuedConnection);
 }
 
+void Manager::ScheduleExpiryTimerLater()
+{
+    QMetaObject::invokeMethod(
+        this,
+        [this] {
+            std::optional<std::chrono::milliseconds> nextMs;
+            if (const auto stateExpiry = _stateMgr.NextExpiry(); stateExpiry.has_value()) {
+                nextMs = std::chrono::duration_cast<std::chrono::milliseconds>(stateExpiry.value());
+            }
+
+            {
+                std::lock_guard<std::mutex> lock{_mutex};
+                if (_lastNearbyState.has_value() && !_deviceConnected) {
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - _lastNearbySeen);
+                    const auto remaining = std::max(
+                        std::chrono::milliseconds{50}, std::chrono::milliseconds{12000} - elapsed);
+                    if (!nextMs.has_value() || remaining < nextMs.value()) {
+                        nextMs = remaining;
+                    }
+                }
+            }
+
+            if (!nextMs.has_value()) {
+                _expiryTimer.stop();
+                return;
+            }
+            const auto ms = std::max<int>(50, static_cast<int>(nextMs->count()));
+            _expiryTimer.start(ms);
+        },
+        Qt::QueuedConnection);
+}
+
+void Manager::OnExpiryTimeout()
+{
+    _stateMgr.ExpireStale();
+    bool clearNearby = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (_lastNearbyState.has_value() && !_deviceConnected &&
+            std::chrono::steady_clock::now() - _lastNearbySeen >= std::chrono::seconds{12})
+        {
+            _lastNearbyState.reset();
+            _lastNearbyLidOpen = false;
+            clearNearby = true;
+        }
+    }
+    if (clearNearby) {
+        emit NearbyCleared();
+    }
+    ScheduleExpiryTimerLater();
+}
+
 void Manager::StartScanner()
 {
     {
         std::lock_guard<std::mutex> lock{_mutex};
         if (!ShouldScan()) {
-            LOG(Info, "Skip Bluetooth AdvWatcher start: no bound device, or it is disconnected "
-                      "and scanning while disconnected is off.");
+            LOG(Info, "Skip Bluetooth AdvWatcher start: no bound device, suspended, AAP active, "
+                      "or disconnected with auto-connect off.");
             return;
         }
         if (_scannerWanted) {
@@ -130,6 +285,555 @@ void Manager::SetScanWhileDisconnected(bool enable)
     ReconcileScannerLater();
 }
 
+void Manager::SetShowNearbyWhenDisconnected(bool enable)
+{
+    bool clearNearby = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (_showNearbyWhenDisconnected == enable) {
+            return;
+        }
+        _showNearbyWhenDisconnected = enable;
+        if (!enable && _lastNearbyState.has_value()) {
+            _lastNearbyState.reset();
+            _lastNearbyLidOpen = false;
+            clearNearby = true;
+        }
+    }
+    if (clearNearby) {
+        emit NearbyCleared();
+    }
+    LOG(Info, "Show nearby popup while disconnected: {}", enable);
+    ReconcileScannerLater();
+}
+
+bool Manager::SendAapControl(
+    std::vector<uint8_t> packet, std::optional<Aap::InboundMessage> optimisticMsg,
+    std::vector<uint8_t> followUpPacket)
+{
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_aapConnected || !_deviceConnected || !_controlTransport->IsConnected()) {
+            return false;
+        }
+    }
+
+    if (!_controlTransport->SendPacket(packet)) {
+        return false;
+    }
+    if (!followUpPacket.empty()) {
+        _controlTransport->SendPacket(followUpPacket);
+    }
+
+    PendingStateSignals pending;
+    if (optimisticMsg.has_value()) {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (auto update = _stateMgr.OnAapMessage(optimisticMsg.value(), _boundModel);
+            update.has_value())
+        {
+            pending = PrepareStateChangedLocked(std::move(update.value()));
+        }
+    }
+    EmitStateSignals(pending);
+    return true;
+}
+
+bool Manager::SetNoiseControlMode(NoiseControlMode mode)
+{
+    LOG(Info, "AAP: requesting noise control mode '{}'.", Helper::ToString(mode));
+
+    bool connected = false;
+    bool supportsAllowOff = false;
+    bool needAllowOffFirst = false;
+    uint64_t offEpoch = 0;
+    PendingStateSignals pending;
+
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        connected = _aapConnected && _deviceConnected && _controlTransport->IsConnected();
+        if (!connected) {
+            return false;
+        }
+
+        const auto state = _stateMgr.GetCurrentState();
+        const Model model =
+            state.has_value() && state->model != Model::Unknown ? state->model : _boundModel;
+        supportsAllowOff = CapabilitiesFor(model).supportsAllowOffMode;
+
+        if (mode == NoiseControlMode::Off && supportsAllowOff) {
+            const auto now = std::chrono::steady_clock::now();
+            offEpoch = ++_pendingOffModeEpoch;
+            _offModeRetrySent = false;
+            _userDisabledAllowOff = false;
+            needAllowOffFirst = !_allowOffSentToDevice || !state.has_value() ||
+                                state->noiseControl.allowOffListeningMode != std::optional{true};
+            _allowOffSentToDevice = true;
+            _pendingOffModeSendAt =
+                needAllowOffFirst ? (now + std::chrono::milliseconds{160}) : now;
+            _pendingOffModeUntil = now + std::chrono::milliseconds{needAllowOffFirst ? 1100 : 900};
+
+            if (needAllowOffFirst) {
+                if (auto u1 = _stateMgr.OnAapMessage(
+                        Aap::FeatureToggleNotification{
+                            .feature = Aap::ToggleFeature::AllowOffListeningMode, .enabled = true},
+                        _boundModel);
+                    u1.has_value())
+                {
+                    pending = PrepareStateChangedLocked(std::move(u1.value()));
+                }
+            }
+            if (auto u2 = _stateMgr.OnAapMessage(
+                    Aap::NoiseControlNotification{.mode = NoiseControlMode::Off}, _boundModel);
+                u2.has_value())
+            {
+                pending = PrepareStateChangedLocked(std::move(u2.value()));
+            }
+        }
+        else {
+            ++_pendingOffModeEpoch;
+            _pendingOffModeUntil = {};
+            _pendingOffModeSendAt = {};
+            _offModeRetrySent = false;
+        }
+    }
+
+    if (mode == NoiseControlMode::Off && supportsAllowOff) {
+        EmitStateSignals(pending);
+        if (needAllowOffFirst) {
+            LOG(Info,
+                "AAP: enabling Allow \"Off\" Listening Mode (0x34) and scheduling Listening Off "
+                "in 160 ms.");
+            _controlTransport->SendPacket(Aap::BuildSetAllowOffListeningModePacket(true));
+            QMetaObject::invokeMethod(
+                this,
+                [this, offEpoch] {
+                    QTimer::singleShot(160, this, [this, offEpoch] {
+                        {
+                            std::lock_guard<std::mutex> lock{_mutex};
+                            if (!_aapConnected || _pendingOffModeEpoch != offEpoch ||
+                                !_controlTransport->IsConnected())
+                            {
+                                return;
+                            }
+                        }
+                        _controlTransport->SendPacket(
+                            Aap::BuildSetNoiseControlPacket(NoiseControlMode::Off));
+                    });
+                },
+                Qt::QueuedConnection);
+        }
+        else {
+            _controlTransport->SendPacket(Aap::BuildSetNoiseControlPacket(NoiseControlMode::Off));
+        }
+        return true;
+    }
+
+    return SendAapControl(
+        Aap::BuildSetNoiseControlPacket(mode), Aap::NoiseControlNotification{.mode = mode});
+}
+
+bool Manager::CycleNoiseControlMode()
+{
+    NoiseControlMode next = NoiseControlMode::Off;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_aapConnected || !_deviceConnected || !_controlTransport->IsConnected()) {
+            return false;
+        }
+
+        const auto state = _stateMgr.GetCurrentState();
+        const Model model =
+            state.has_value() && state->model != Model::Unknown ? state->model : _boundModel;
+        const auto caps = CapabilitiesFor(model);
+        if (!caps.SupportsNoiseControl()) {
+            return false;
+        }
+
+        std::vector<NoiseControlMode> modes{NoiseControlMode::Off};
+        if (caps.supportsNoiseCancellation) {
+            modes.push_back(NoiseControlMode::NoiseCancellation);
+        }
+        if (caps.supportsTransparency) {
+            modes.push_back(NoiseControlMode::Transparency);
+        }
+        if (caps.supportsAdaptiveAudio) {
+            modes.push_back(NoiseControlMode::Adaptive);
+        }
+
+        const NoiseControlMode current =
+            (state.has_value() && state->noiseControl.activeMode.has_value())
+                ? state->noiseControl.activeMode.value()
+                : NoiseControlMode::Off;
+
+        auto it = std::find(modes.begin(), modes.end(), current);
+        const size_t nextIndex =
+            it == modes.end()
+                ? 0
+                : (static_cast<size_t>(std::distance(modes.begin(), it)) + 1) % modes.size();
+        next = modes[nextIndex];
+    }
+
+    LOG(Info, "AAP: cycling noise control mode to '{}'.", Helper::ToString(next));
+    return SetNoiseControlMode(next);
+}
+
+bool Manager::SetConversationalAwareness(bool enabled)
+{
+    LOG(Info, "AAP: requesting conversational awareness '{}'.", enabled);
+    if (!enabled) {
+        QMetaObject::invokeMethod(
+            this, [this] { _convSpeechSafetyTimer.stop(); }, Qt::QueuedConnection);
+        emit ConversationAwarenessLevelChanged(0);
+    }
+    return SendAapControl(
+        Aap::BuildSetConversationalAwarenessPacket(enabled),
+        Aap::ConversationalAwarenessNotification{.enabled = enabled});
+}
+
+bool Manager::SetOneBudAnc(bool enabled)
+{
+    return SendAapControl(
+        Aap::BuildSetOneBudAncPacket(enabled),
+        Aap::FeatureToggleNotification{
+            .feature = Aap::ToggleFeature::OneBudAnc, .enabled = enabled});
+}
+
+bool Manager::SetPersonalizedVolume(bool enabled)
+{
+    return SendAapControl(
+        Aap::BuildSetPersonalizedVolumePacket(enabled),
+        Aap::FeatureToggleNotification{
+            .feature = Aap::ToggleFeature::PersonalizedVolume, .enabled = enabled});
+}
+
+bool Manager::SetLoudSoundReduction(bool enabled)
+{
+    return SendAapControl(
+        Aap::BuildSetLoudSoundReductionPacket(enabled),
+        Aap::FeatureToggleNotification{
+            .feature = Aap::ToggleFeature::LoudSoundReduction, .enabled = enabled});
+}
+
+bool Manager::SetAdaptiveNoiseLevel(uint8_t level)
+{
+    return SendAapControl(
+        Aap::BuildSetAdaptiveNoiseLevelPacket(level),
+        Aap::AdaptiveNoiseLevelNotification{.level = level});
+}
+
+bool Manager::SetHeadGestures(bool enabled)
+{
+    return SendAapControl(
+        Aap::BuildSetHeadGesturesPacket(enabled),
+        Aap::FeatureToggleNotification{
+            .feature = Aap::ToggleFeature::HeadGestures, .enabled = enabled});
+}
+
+bool Manager::SetMicrophoneSide(MicrophoneSide side)
+{
+    return SendAapControl(
+        Aap::BuildSetMicrophoneSidePacket(side), Aap::MicrophoneSideNotification{.side = side});
+}
+
+bool Manager::SetToneVolume(uint8_t volumePercent)
+{
+    return SendAapControl(
+        Aap::BuildSetToneVolumePacket(volumePercent),
+        Aap::ToneVolumeNotification{.volume = volumePercent});
+}
+
+bool Manager::SetAllowOffListeningMode(bool allow)
+{
+    bool switchToTransparency = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        _userDisabledAllowOff = !allow;
+        _allowOffSentToDevice = allow;
+        if (!allow) {
+            ++_pendingOffModeEpoch;
+            _pendingOffModeUntil = {};
+            const auto st = _stateMgr.GetCurrentState();
+            switchToTransparency =
+                st.has_value() && st->noiseControl.activeMode == NoiseControlMode::Off;
+        }
+    }
+    const bool ok = SendAapControl(
+        Aap::BuildSetAllowOffListeningModePacket(allow),
+        Aap::FeatureToggleNotification{
+            .feature = Aap::ToggleFeature::AllowOffListeningMode, .enabled = allow});
+    if (ok && switchToTransparency) {
+        SetNoiseControlMode(NoiseControlMode::Transparency);
+    }
+    return ok;
+}
+
+bool Manager::SetListeningModeCycle(uint8_t modeMask)
+{
+    return SendAapControl(
+        Aap::BuildSetListeningModeCyclePacket(modeMask),
+        Aap::ListeningModeCycleNotification{.modeMask = modeMask});
+}
+
+bool Manager::SetPressSpeed(PressSpeed speed)
+{
+    return SendAapControl(
+        Aap::BuildSetPressSpeedPacket(speed), Aap::PressSpeedNotification{.speed = speed});
+}
+
+bool Manager::SetPressHoldDuration(PressHoldDuration duration)
+{
+    return SendAapControl(
+        Aap::BuildSetPressHoldDurationPacket(duration),
+        Aap::PressHoldDurationNotification{.duration = duration});
+}
+
+bool Manager::SetHearingAid(bool enabled)
+{
+    return SendAapControl(
+        Aap::BuildSetHearingAidPacket(enabled),
+        Aap::FeatureToggleNotification{
+            .feature = Aap::ToggleFeature::HearingAid, .enabled = enabled});
+}
+
+bool Manager::SetMediaAssist(bool enabled)
+{
+    return SendAapControl(
+        Aap::BuildSetMediaAssistPacket(enabled),
+        Aap::FeatureToggleNotification{
+            .feature = Aap::ToggleFeature::MediaAssist, .enabled = enabled});
+}
+
+bool Manager::SetHeartRateMonitoring(bool enabled)
+{
+    LOG(Info, "AAP: requesting RTBuddy optical heart rate sensor '{}'.", enabled);
+
+    bool connected = false;
+    bool bothInCase = false;
+    PendingStateSignals pending;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        connected = _aapConnected && _deviceConnected && _controlTransport->IsConnected();
+        if (!connected) {
+            return false;
+        }
+        _heartRateWanted = enabled;
+        _heartRateWarmupLogged = false;
+        _lastLoggedBpm.reset();
+        ++_heartRateEpoch;
+
+        const auto st = _stateMgr.GetCurrentState();
+        bothInCase = st.has_value() && st->caseBox.isBothPodsInCase && !st->pods.left.isInEar &&
+                     !st->pods.right.isInEar;
+        _heartRatePausedOutOfEar = enabled && bothInCase;
+
+        if (auto u1 = _stateMgr.OnAapMessage(
+                Aap::FeatureToggleNotification{
+                    .feature = Aap::ToggleFeature::HeartRateMonitoring, .enabled = enabled},
+                _boundModel);
+            u1.has_value())
+        {
+            pending = PrepareStateChangedLocked(std::move(u1.value()));
+        }
+        const HeartRateStatus nextStatus =
+            !enabled ? HeartRateStatus::Off
+                     : (bothInCase ? HeartRateStatus::WaitingForEar : HeartRateStatus::Starting);
+        if (auto u2 = _stateMgr.OnAapMessage(
+                Aap::HeartRateStatusNotification{.status = nextStatus}, _boundModel);
+            u2.has_value())
+        {
+            pending = PrepareStateChangedLocked(std::move(u2.value()));
+        }
+    }
+
+    EmitStateSignals(pending);
+
+    if (enabled) {
+        if (!bothInCase) {
+            StartHeartRateCampaignLater(true);
+        }
+        else {
+            LOG(Info, "AAP heart rate: AirPods are in case; waiting for ear contact to start.");
+        }
+    }
+    else {
+        QMetaObject::invokeMethod(
+            this, [this] { _heartRateWatchdog.stop(); }, Qt::QueuedConnection);
+        StopHeartRateWire();
+    }
+    return true;
+}
+
+bool Manager::RenameDevice(const QString &name)
+{
+    if (name.trimmed().isEmpty()) {
+        return false;
+    }
+    return SendAapControl(Aap::BuildSetRenamePacket(name.trimmed().toStdString()));
+}
+
+void Manager::SetAudioProfile(AudioProfile profile, QString sourceProcess)
+{
+    PendingStateSignals pending;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (auto update = _stateMgr.SetAudioProfile(profile, std::move(sourceProcess));
+            update.has_value())
+        {
+            pending = PrepareStateChangedLocked(std::move(update.value()));
+        }
+    }
+    EmitStateSignals(pending);
+}
+
+void Manager::SetLowLatencyMode(bool enabled)
+{
+    if (_controlTransport) {
+        _controlTransport->SetLowLatencyMode(enabled);
+    }
+}
+
+std::optional<RadioServiceInfo> Manager::GetRadioServiceInfo() const
+{
+    return _controlTransport ? _controlTransport->GetRadioServiceInfo() : std::nullopt;
+}
+
+bool Manager::ApplyRadioProxyOptions(const RadioProxyOptions &options)
+{
+    if (!_controlTransport) {
+        return false;
+    }
+    const bool ok = _controlTransport->ApplyRadioProxyOptions(options);
+    uint64_t addr = 0;
+    QString name;
+    bool supportsStereoMic = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (_boundDevice.has_value()) {
+            addr = _boundDevice->GetAddress();
+            name = Details::ResolveDisplayName(_deviceName, _boundModel);
+            supportsStereoMic = CapabilitiesFor(_boundModel).supportsStereoA2dpMic;
+        }
+    }
+    if (addr != 0) {
+        _controlTransport->ConfigureVirtualMic(
+            addr, options.virtualMicEnabled, !supportsStereoMic, name.toStdString());
+    }
+    return ok;
+}
+
+bool Manager::RetryRadioServiceAfterGuard()
+{
+    return _controlTransport && _controlTransport->RetryRadioServiceAfterGuard();
+}
+
+bool Manager::RestoreNativeRadioDriver()
+{
+    return _controlTransport && _controlTransport->RestoreNativeRadioDriver();
+}
+
+void Manager::ReconnectControlTransport()
+{
+    uint64_t addr = 0;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (_deviceConnected && _boundDevice.has_value()) {
+            addr = _boundDevice->GetAddress();
+        }
+    }
+    if (addr != 0 && _controlTransport && _controlTransport->IsAvailable()) {
+        _controlTransport->Connect(addr);
+    }
+}
+
+void Manager::DisconnectControlTransport()
+{
+    if (_controlTransport) {
+        _controlTransport->Disconnect();
+    }
+    PendingStateSignals pending;
+    bool emitControlDropped = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (_aapConnected) {
+            _aapConnected = false;
+            emitControlDropped = true;
+            if (auto update = _stateMgr.SetAapConnected(false, _boundModel); update.has_value()) {
+                pending = PrepareStateChangedLocked(std::move(update.value()));
+            }
+        }
+    }
+    EmitStateSignals(pending);
+    if (emitControlDropped) {
+        emit ControlConnectionChanged(false);
+    }
+    ScheduleExpiryTimerLater();
+    ReconcileScannerLater();
+}
+
+void Manager::RebindAfterRadioChange()
+{
+    uint64_t addr = 0;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        addr = _requestedDeviceAddress;
+    }
+    if (addr != 0) {
+        LOG(Info, "Rebinding Bluetooth device handle after radio driver change.");
+        OnBoundDeviceAddressChanged(addr);
+    }
+}
+
+Manager::DiagnosticsSnapshot Manager::GetDiagnostics() const
+{
+    std::lock_guard<std::mutex> lock{_mutex};
+    DiagnosticsSnapshot snap;
+    snap.boundDeviceName = Details::ResolveDisplayName(_deviceName, _boundModel);
+    snap.boundModel = _boundModel;
+    snap.bluetoothConnected = _deviceConnected;
+    snap.aapDriverAvailable = _controlTransport->IsAvailable();
+    snap.aapConnected = _aapConnected && _deviceConnected && _controlTransport->IsConnected();
+    snap.transportBackend = QString::fromStdString(_controlTransport->BackendName());
+    snap.radioServiceInfo = _controlTransport->GetRadioServiceInfo();
+    snap.scannerRunning = _scannerWanted;
+    snap.lastRssi = _lastRssi;
+    snap.lastAdvHex = _lastAdvHex;
+    snap.heartRateServiceId = _rtBuddyParser.HeartRateService();
+    snap.currentState = _stateMgr.GetCurrentState();
+    if (snap.currentState.has_value() && snap.currentState->displayName.isEmpty()) {
+        snap.currentState->displayName =
+            Details::ResolveDisplayName(_deviceName, snap.currentState->model);
+    }
+    return snap;
+}
+
+void Manager::OnSystemSuspend()
+{
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        _systemSuspended = true;
+    }
+    LOG(Info, "System suspending: pausing BLE scanner.");
+    _controlTransport->Disconnect();
+    StopScanner();
+}
+
+void Manager::OnSystemResume()
+{
+    std::optional<Bluetooth::DeviceState> currentState;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        _systemSuspended = false;
+        if (_boundDevice.has_value()) {
+            currentState = _boundDevice->GetConnectionState();
+        }
+    }
+    LOG(Info, "System resumed: reconciling Bluetooth state.");
+    if (currentState.has_value()) {
+        HandleBoundDeviceConnectionStateChanged(currentState.value());
+    }
+    ReconcileScannerLater();
+}
+
 void Manager::OnBoundDeviceAddressChanged(uint64_t address)
 {
     _deviceLookupThread.request_stop();
@@ -137,14 +841,32 @@ void Manager::OnBoundDeviceAddressChanged(uint64_t address)
         _deviceLookupThread.join();
     }
 
-    std::lock_guard<std::mutex> lock{_mutex};
+    _controlTransport->Disconnect();
 
-    _requestedDeviceAddress = address;
-    _boundDevice.reset();
-    _boundModel = Model::Unknown;
-    _deviceConnected = false;
-    _stateMgr.Disconnect();
+    bool wasAapConnected = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+
+        _requestedDeviceAddress = address;
+        _boundDevice.reset();
+        _deviceName.clear();
+        _boundContainerId.clear();
+        _boundModel = Model::Unknown;
+        _deviceConnected = false;
+        wasAapConnected = _aapConnected;
+        _aapConnected = false;
+        _lastRssi.reset();
+        _lastAdvHex.clear();
+        _seenUnknownAapOpcodes.clear();
+        _stateMgr.Disconnect();
+    }
+
     emit DeviceConnectionChanged(false);
+    if (wasAapConnected) {
+        emit ControlConnectionChanged(false);
+    }
+
+    ScheduleExpiryTimerLater();
     ReconcileScannerLater();
 
     if (address == 0) {
@@ -172,79 +894,794 @@ void Manager::OnBoundDeviceAddressChanged(uint64_t address)
 
 void Manager::CompleteBoundDeviceLookup(uint64_t address, std::optional<Bluetooth::Device> device)
 {
-    std::lock_guard<std::mutex> lock{_mutex};
+    QString resolvedDisplayName;
+    Model resolvedModel = Model::Unknown;
+    QString resolvedContainerId;
+    bool unavailable = false;
+    Bluetooth::DeviceState initialState = Bluetooth::DeviceState::Disconnected;
 
-    if (address != _requestedDeviceAddress) {
-        LOG(Info, "Ignore a stale bound-device lookup result.");
-        return;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+
+        if (address != _requestedDeviceAddress) {
+            LOG(Info, "Ignore a stale bound-device lookup result.");
+            return;
+        }
+
+        if (!device.has_value()) {
+            LOG(Warn, "The bound device address is no longer available.");
+            unavailable = true;
+        }
+        else {
+            _boundDevice = std::move(device);
+            _boundModel = AppleCP::AirPods::GetModel(_boundDevice->GetProductId());
+
+            _deviceName = QString::fromStdString([&] {
+                auto name = _boundDevice->GetName();
+                return name.find("Bluetooth") != std::string::npos ? std::string{} : name;
+            }());
+            _boundContainerId = QString::fromStdString(_boundDevice->GetContainerId());
+
+            resolvedDisplayName = Details::ResolveDisplayName(_deviceName, _boundModel);
+            resolvedModel = _boundModel;
+            resolvedContainerId = _boundContainerId;
+
+            _boundDevice->CbConnectionStatusChanged() += [this](auto &&...args) {
+                HandleBoundDeviceConnectionStateChanged(std::forward<decltype(args)>(args)...);
+            };
+
+            initialState = _boundDevice->GetConnectionState();
+        }
     }
 
-    if (!device.has_value()) {
-        LOG(Warn, "The bound device address is no longer available.");
+    if (unavailable) {
         emit BoundDeviceUnavailable();
         return;
     }
 
-    _boundDevice = std::move(device);
-    _boundModel = AppleCP::AirPods::GetModel(_boundDevice->GetProductId());
-
-    _deviceName = QString::fromStdString([&] {
-        auto name = _boundDevice->GetName();
-        return name.find("Bluetooth") != std::string::npos ? std::string{} : name;
-    }());
-
-    _boundDevice->CbConnectionStatusChanged() += [this](auto &&...args) {
-        std::lock_guard<std::mutex> lock{_mutex};
-        OnBoundDeviceConnectionStateChanged(std::forward<decltype(args)>(args)...);
-    };
-
-    OnBoundDeviceConnectionStateChanged(_boundDevice->GetConnectionState());
+    emit BoundDeviceResolved(resolvedDisplayName, resolvedModel, resolvedContainerId);
+    HandleBoundDeviceConnectionStateChanged(initialState);
 }
 
-void Manager::OnBoundDeviceConnectionStateChanged(Bluetooth::DeviceState state)
+void Manager::HandleBoundDeviceConnectionStateChanged(Bluetooth::DeviceState state)
 {
-    const bool oldDeviceConnected = _deviceConnected;
-    bool newDeviceConnected = state == Bluetooth::DeviceState::Connected;
-    bool doDisconnect = oldDeviceConnected && !newDeviceConnected;
-    _deviceConnected = newDeviceConnected;
-    emit DeviceConnectionChanged(newDeviceConnected);
+    bool oldDeviceConnected = false;
+    bool newDeviceConnected = (state == Bluetooth::DeviceState::Connected);
+    bool doDisconnect = false;
+    bool wasAapConnected = false;
+    uint64_t connectAddr = 0;
 
-    ReconcileScannerLater();
-
-    if (doDisconnect) {
-        _stateMgr.Disconnect();
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        oldDeviceConnected = _deviceConnected;
+        doDisconnect = oldDeviceConnected && !newDeviceConnected;
+        _deviceConnected = newDeviceConnected;
+        if (newDeviceConnected) {
+            _lastNearbyState.reset();
+            _lastNearbyLidOpen = false;
+            if (_boundDevice.has_value()) {
+                connectAddr = _boundDevice->GetAddress();
+            }
+        }
+        else if (doDisconnect) {
+            wasAapConnected = _aapConnected;
+            _aapConnected = false;
+            _stateMgr.Disconnect();
+        }
     }
 
     LOG(Info, "The device we bound is updated. current: {}, new: {}", oldDeviceConnected,
         newDeviceConnected);
+
+    emit DeviceConnectionChanged(newDeviceConnected);
+
+    if (newDeviceConnected && connectAddr != 0 && _controlTransport->IsAvailable()) {
+        _controlTransport->Connect(connectAddr);
+    }
+    else if (doDisconnect) {
+        _controlTransport->Disconnect();
+        if (wasAapConnected) {
+            emit ControlConnectionChanged(false);
+        }
+        ScheduleExpiryTimerLater();
+    }
+
+    ReconcileScannerLater();
 }
 
-void Manager::OnStateChanged(Details::StateManager::UpdateEvent updateEvent)
+void Manager::OnControlConnectionChanged(bool connected)
+{
+    bool shouldHandshake = false;
+    bool rejectStaleConnect = false;
+    bool resumeHeartRate = false;
+    uint64_t epoch = 0;
+    PendingStateSignals pending;
+
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        _rtBuddyReassembler.Reset();
+        _rtBuddyParser.Reset();
+        _rtBuddySeq = 0;
+        _heartRateWarmupLogged = false;
+        _lastLoggedBpm.reset();
+        _allowOffSentToDevice = false;
+        _pendingOffModeUntil = {};
+        _pendingOffModeSendAt = {};
+        _offModeRetrySent = false;
+        ++_pendingOffModeEpoch;
+        epoch = ++_heartRateEpoch;
+
+        if (connected && !_deviceConnected) {
+            rejectStaleConnect = true;
+            _aapConnected = false;
+        }
+        else {
+            _aapConnected = connected;
+            shouldHandshake = connected;
+            resumeHeartRate = connected && _heartRateWanted;
+            if (auto update = _stateMgr.SetAapConnected(connected, _boundModel); update.has_value())
+            {
+                pending = PrepareStateChangedLocked(std::move(update.value()));
+            }
+        }
+    }
+
+    if (rejectStaleConnect) {
+        LOG(Info,
+            "Ignoring stale AAP connection notification while bound AirPods are disconnected.");
+        _controlTransport->Disconnect();
+        return;
+    }
+
+    if (shouldHandshake) {
+        LOG(Info, "AAP control transport connected; starting handshake.");
+        _controlTransport->SendPacket(Aap::BuildHandshakePacket());
+        _controlTransport->SendPacket(Aap::BuildEnableFeaturesPacket());
+        _controlTransport->SendPacket(Aap::BuildRequestNotificationsPacket());
+
+        // Ask AirPods Pro 3 to announce all RTBuddy sensor HID descriptors (so dynamic heart-rate
+        // service IDs are discovered cleanly across firmware updates).
+        QMetaObject::invokeMethod(
+            this,
+            [this, epoch, resumeHeartRate] {
+                QTimer::singleShot(500, this, [this, epoch] {
+                    std::vector<uint8_t> req;
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_aapConnected || _heartRateEpoch != epoch ||
+                            !_controlTransport->IsConnected())
+                        {
+                            return;
+                        }
+                        req = RtBuddy::BuildRequestAllDescriptorsPacket(NextRtBuddySeqLocked());
+                    }
+                    _controlTransport->SendPacket(req);
+                });
+                // Proactively arm Allow "Off" Listening Mode (0x34) once per session on models
+                // that gate Off behind it (AirPods Pro 2/3, AirPods 4 ANC, AirPods 5), unless
+                // the user explicitly disabled it, so Listening Off responds immediately.
+                QTimer::singleShot(650, this, [this, epoch] {
+                    bool shouldArmAllowOff = false;
+                    PendingStateSignals armPending;
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_aapConnected || _heartRateEpoch != epoch || _userDisabledAllowOff ||
+                            _allowOffSentToDevice || !_controlTransport->IsConnected())
+                        {
+                            return;
+                        }
+                        const auto st = _stateMgr.GetCurrentState();
+                        const Model model =
+                            st.has_value() && st->model != Model::Unknown ? st->model : _boundModel;
+                        if (CapabilitiesFor(model).supportsAllowOffMode) {
+                            shouldArmAllowOff = true;
+                            _allowOffSentToDevice = true;
+                            if (auto u = _stateMgr.OnAapMessage(
+                                    Aap::FeatureToggleNotification{
+                                        .feature = Aap::ToggleFeature::AllowOffListeningMode,
+                                        .enabled = true},
+                                    _boundModel);
+                                u.has_value())
+                            {
+                                armPending = PrepareStateChangedLocked(std::move(u.value()));
+                            }
+                        }
+                    }
+                    if (shouldArmAllowOff) {
+                        LOG(Info, "AAP: arming Allow \"Off\" Listening Mode (0x34) for session.");
+                        _controlTransport->SendPacket(
+                            Aap::BuildSetAllowOffListeningModePacket(true));
+                        EmitStateSignals(armPending);
+                    }
+                });
+                if (resumeHeartRate) {
+                    QTimer::singleShot(900, this, [this, epoch] {
+                        {
+                            std::lock_guard<std::mutex> lock{_mutex};
+                            if (!_aapConnected || !_heartRateWanted || _heartRateEpoch != epoch) {
+                                return;
+                            }
+                        }
+                        StartHeartRateCampaignLater(true);
+                    });
+                }
+            },
+            Qt::QueuedConnection);
+    }
+    else {
+        LOG(Info, "AAP control transport disconnected; falling back to BLE advertisements.");
+        QMetaObject::invokeMethod(
+            this,
+            [this] {
+                _heartRateWatchdog.stop();
+                _convSpeechSafetyTimer.stop();
+            },
+            Qt::QueuedConnection);
+        emit ConversationAwarenessLevelChanged(0);
+    }
+
+    EmitStateSignals(pending);
+    emit ControlConnectionChanged(connected);
+    ScheduleExpiryTimerLater();
+    ReconcileScannerLater();
+}
+
+void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
+{
+    // 1. Feed every packet through the RTBuddy 0x17 SensorDataWX reassembler & stateful parser.
+    bool mappingChanged = false;
+    std::optional<uint8_t> discoveredHeart;
+    std::optional<uint8_t> discoveredMotion;
+    bool restartOnNewService = false;
+    bool sawLockedSample = false;
+    bool logWarmup = false;
+    std::optional<RtBuddy::HeartRateSample> lockedSample;
+    bool logBpm = false;
+    PendingStateSignals rtPending;
+
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        const auto frames = _rtBuddyReassembler.Feed(packet);
+        for (const auto &frame : frames) {
+            const auto batch = _rtBuddyParser.ParseFrame(frame);
+            if (batch.mappingChanged) {
+                mappingChanged = true;
+                discoveredHeart = _rtBuddyParser.HeartRateService();
+                discoveredMotion = _rtBuddyParser.MotionService();
+                restartOnNewService =
+                    _heartRateWanted && !_heartRatePausedOutOfEar && _aapConnected;
+            }
+            if (batch.heartRate.has_value() && _deviceConnected) {
+                const auto sample = batch.heartRate.value();
+                _lastHeartRateSampleTime = std::chrono::steady_clock::now();
+                sawLockedSample = true;
+                lockedSample = sample;
+                if (!_lastLoggedBpm.has_value() || _lastLoggedBpm.value() != sample.bpm) {
+                    _lastLoggedBpm = sample.bpm;
+                    logBpm = true;
+                }
+                if (auto update = _stateMgr.OnAapMessage(
+                        Aap::HeartRateNotification{
+                            .bpm = sample.bpm, .confidence = sample.confidence},
+                        _boundModel);
+                    update.has_value())
+                {
+                    rtPending = PrepareStateChangedLocked(std::move(update.value()));
+                }
+            }
+            else if (batch.warmupFrameSeen && _heartRateWanted && _deviceConnected) {
+                const auto cur = _stateMgr.GetCurrentState();
+                const auto status =
+                    cur.has_value() ? cur->noiseControl.heartRateStatus : HeartRateStatus::Off;
+                if (status != HeartRateStatus::Live && status != HeartRateStatus::AcquiringLock) {
+                    if (!_heartRateWarmupLogged) {
+                        _heartRateWarmupLogged = true;
+                        logWarmup = true;
+                    }
+                    if (auto update = _stateMgr.OnAapMessage(
+                            Aap::HeartRateStatusNotification{
+                                .status = HeartRateStatus::AcquiringLock},
+                            _boundModel);
+                        update.has_value())
+                    {
+                        rtPending = PrepareStateChangedLocked(std::move(update.value()));
+                    }
+                }
+            }
+        }
+    }
+
+    if (mappingChanged) {
+        LOG(Info, "RTBuddy sensor services discovered: heart={}, motion={}",
+            discoveredHeart.has_value() ? std::to_string(discoveredHeart.value()) : "none",
+            discoveredMotion.has_value() ? std::to_string(discoveredMotion.value()) : "none");
+        if (restartOnNewService) {
+            UpdateHeartRateStatus(HeartRateStatus::Starting);
+            StartHeartRateCampaignLater(true);
+        }
+    }
+    if (logWarmup) {
+        LOG(Info, "AAP optical heart rate: PPG sensor warming up, acquiring pulse lock...");
+    }
+    if (logBpm && lockedSample.has_value()) {
+        const int confPct = (static_cast<int>(lockedSample->confidence) * 100 + 127) / 255;
+        LOG(Info, "AAP optical heart rate: {} BPM (confidence {}%)", lockedSample->bpm, confPct);
+    }
+    if (sawLockedSample) {
+        QMetaObject::invokeMethod(
+            this,
+            [this] {
+                if (_heartRateWanted && _aapConnected) {
+                    _heartRateWatchdog.start(12000);
+                }
+            },
+            Qt::QueuedConnection);
+    }
+    EmitStateSignals(rtPending);
+
+    if (IsRtBuddyFrame(packet)) {
+        return;
+    }
+
+    // 2. Standard AAP control / status frames.
+    const auto message = Aap::DecodePacket(packet);
+    if (!message.has_value()) {
+        if (packet.size() >= 6) {
+            const uint8_t opcode = packet[4];
+            bool firstTime = false;
+            {
+                std::lock_guard<std::mutex> lock{_mutex};
+                firstTime = _seenUnknownAapOpcodes.insert(opcode).second;
+            }
+            if (firstTime) {
+                std::string hex;
+                const size_t n = std::min<size_t>(packet.size(), 20);
+                hex.reserve(n * 3);
+                for (size_t i = 0; i < n; ++i) {
+                    if (i > 0) {
+                        hex.push_back(' ');
+                    }
+                    hex += std::format("{:02X}", packet[i]);
+                }
+                LOG(Info, "AAP unhandled frame (len={}, opcode=0x{:02X}): {}", packet.size(),
+                    opcode, hex);
+            }
+        }
+        return;
+    }
+
+    LogDecodedAapMessage(message.value());
+
+    std::optional<uint8_t> convLevelToEmit;
+    bool pauseHrForEar = false;
+    bool resumeHrForEar = false;
+    bool retryOffMode = false;
+    uint64_t retryOffEpoch = 0;
+    uint8_t retryCycleMask = ListeningCycleBit::kOff | ListeningCycleBit::kNoiseCancellation |
+                             ListeningCycleBit::kTransparency | ListeningCycleBit::kAdaptive;
+    PendingStateSignals pending;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_deviceConnected) {
+            return;
+        }
+        bool suppressNoiseEcho = false;
+        if (const auto *ncMsg = std::get_if<Aap::NoiseControlNotification>(&message.value())) {
+            const auto now = std::chrono::steady_clock::now();
+            if (ncMsg->mode == NoiseControlMode::Off) {
+                _pendingOffModeUntil = {};
+                _pendingOffModeSendAt = {};
+                _offModeRetrySent = false;
+            }
+            else if (
+                _pendingOffModeUntil != std::chrono::steady_clock::time_point{} &&
+                now < _pendingOffModeUntil)
+            {
+                if (now < _pendingOffModeSendAt) {
+                    // Ignore a stale mode echo arriving while waiting for 0x34 to settle
+                    // before 0x0D = Off is sent.
+                    suppressNoiseEcho = true;
+                }
+                else if (!_offModeRetrySent) {
+                    // AirPods rejected Off (e.g. 0x34 or 0x1A cycle mask had not settled yet).
+                    // Re-arm both and retry Off once after 200 ms.
+                    _offModeRetrySent = true;
+                    _allowOffSentToDevice = true;
+                    retryOffEpoch = ++_pendingOffModeEpoch;
+                    _pendingOffModeSendAt = now + std::chrono::milliseconds{200};
+                    _pendingOffModeUntil = now + std::chrono::milliseconds{1200};
+                    if (const auto st = _stateMgr.GetCurrentState();
+                        st.has_value() && st->noiseControl.listeningModeCycleMask.has_value())
+                    {
+                        retryCycleMask = static_cast<uint8_t>(
+                            st->noiseControl.listeningModeCycleMask.value() |
+                            ListeningCycleBit::kOff);
+                    }
+                    retryOffMode = true;
+                    suppressNoiseEcho = true;
+                }
+                else {
+                    // Hardware rejected the retry as well; accept the actual echoed mode.
+                    _pendingOffModeUntil = {};
+                    _pendingOffModeSendAt = {};
+                }
+            }
+        }
+        if (!suppressNoiseEcho) {
+            if (auto update = _stateMgr.OnAapMessage(message.value(), _boundModel);
+                update.has_value())
+            {
+                pending = PrepareStateChangedLocked(std::move(update.value()));
+            }
+        }
+
+        if (const auto *speech =
+                std::get_if<Aap::ConversationalAwarenessSpeechNotification>(&message.value()))
+        {
+            const auto st = _stateMgr.GetCurrentState();
+            const bool caOff =
+                st.has_value() && st->noiseControl.conversationalAwareness == std::optional{false};
+            convLevelToEmit = caOff ? uint8_t{0} : speech->level;
+        }
+        else if (
+            const auto *ca =
+                std::get_if<Aap::ConversationalAwarenessNotification>(&message.value()))
+        {
+            if (!ca->enabled) {
+                convLevelToEmit = uint8_t{0};
+            }
+        }
+        else if (std::holds_alternative<Aap::EarDetectionNotification>(message.value())) {
+            const auto st = _stateMgr.GetCurrentState();
+            const bool worn = st.has_value() && (st->pods.left.isInEar || st->pods.right.isInEar);
+            if (!worn) {
+                convLevelToEmit = uint8_t{0};
+            }
+            if (_heartRateWanted && _aapConnected) {
+                if (!worn && !_heartRatePausedOutOfEar) {
+                    _heartRatePausedOutOfEar = true;
+                    ++_heartRateEpoch;
+                    pauseHrForEar = true;
+                    if (auto u = _stateMgr.OnAapMessage(
+                            Aap::HeartRateStatusNotification{
+                                .status = HeartRateStatus::WaitingForEar},
+                            _boundModel);
+                        u.has_value())
+                    {
+                        pending = PrepareStateChangedLocked(std::move(u.value()));
+                    }
+                }
+                else if (
+                    worn && (_heartRatePausedOutOfEar ||
+                             (st.has_value() &&
+                              (st->noiseControl.heartRateStatus == HeartRateStatus::WaitingForEar ||
+                               st->noiseControl.heartRateStatus == HeartRateStatus::NoSignal))))
+                {
+                    _heartRatePausedOutOfEar = false;
+                    resumeHrForEar = true;
+                    if (auto u = _stateMgr.OnAapMessage(
+                            Aap::HeartRateStatusNotification{.status = HeartRateStatus::Starting},
+                            _boundModel);
+                        u.has_value())
+                    {
+                        pending = PrepareStateChangedLocked(std::move(u.value()));
+                    }
+                }
+            }
+        }
+    }
+
+    EmitStateSignals(pending);
+
+    if (retryOffMode) {
+        LOG(Info,
+            "AAP: AirPods bounced back from Listening Off; re-arming 0x34 + 0x1A (mask=0x{:02X}) "
+            "and retrying Off in 200 ms.",
+            retryCycleMask);
+        _controlTransport->SendPacket(Aap::BuildSetAllowOffListeningModePacket(true));
+        _controlTransport->SendPacket(Aap::BuildSetListeningModeCyclePacket(retryCycleMask));
+        QMetaObject::invokeMethod(
+            this,
+            [this, retryOffEpoch] {
+                QTimer::singleShot(200, this, [this, retryOffEpoch] {
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_aapConnected || _pendingOffModeEpoch != retryOffEpoch ||
+                            !_controlTransport->IsConnected())
+                        {
+                            return;
+                        }
+                    }
+                    _controlTransport->SendPacket(
+                        Aap::BuildSetNoiseControlPacket(NoiseControlMode::Off));
+                });
+            },
+            Qt::QueuedConnection);
+    }
+
+    if (convLevelToEmit.has_value()) {
+        ArmConversationSpeechSafetyLater(convLevelToEmit.value());
+        emit ConversationAwarenessLevelChanged(convLevelToEmit.value());
+    }
+    if (pauseHrForEar) {
+        LOG(Info, "AAP heart rate: AirPods removed from ears; pausing optical sensor.");
+        QMetaObject::invokeMethod(
+            this, [this] { _heartRateWatchdog.stop(); }, Qt::QueuedConnection);
+        StopHeartRateWire();
+    }
+    else if (resumeHrForEar) {
+        LOG(Info, "AAP heart rate: ear contact detected; resuming optical sensor.");
+        StartHeartRateCampaignLater(true);
+    }
+}
+
+uint8_t Manager::NextRtBuddySeqLocked()
+{
+    _rtBuddySeq = static_cast<uint8_t>((_rtBuddySeq % 127u) + 1u);
+    return _rtBuddySeq;
+}
+
+void Manager::StartHeartRateCampaignLater(bool resetAttempts)
+{
+    uint64_t epoch = 0;
+    int attempt = 1;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_heartRateWanted || !_aapConnected || !_controlTransport->IsConnected()) {
+            return;
+        }
+        epoch = ++_heartRateEpoch;
+        _heartRateAttempt = resetAttempts ? 1 : (_heartRateAttempt + 1);
+        attempt = _heartRateAttempt;
+        _lastHeartRateSampleTime = {};
+        _heartRateWarmupLogged = false;
+    }
+
+    QMetaObject::invokeMethod(
+        this, [this, epoch, attempt] { RunHeartRateAttempt(epoch, attempt); },
+        Qt::QueuedConnection);
+}
+
+void Manager::RunHeartRateAttempt(uint64_t epoch, int attempt)
+{
+    std::vector<uint8_t> services;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_heartRateWanted || !_aapConnected || _heartRateEpoch != epoch ||
+            !_controlTransport->IsConnected())
+        {
+            return;
+        }
+        services = _rtBuddyParser.TargetHeartRateServices();
+    }
+
+    std::string serviceList;
+    for (size_t i = 0; i < services.size(); ++i) {
+        if (i > 0) {
+            serviceList.push_back(',');
+        }
+        serviceList += std::to_string(services[i]);
+    }
+    LOG(Info, "AAP heart rate: starting optical PPG sequence (attempt {}/3, services={}).", attempt,
+        serviceList);
+
+    auto sendIfCurrent = [this, epoch](std::vector<uint8_t> pkt) {
+        {
+            std::lock_guard<std::mutex> lock{_mutex};
+            if (!_heartRateWanted || !_aapConnected || _heartRateEpoch != epoch ||
+                !_controlTransport->IsConnected())
+            {
+                return;
+            }
+        }
+        _controlTransport->SendPacket(pkt);
+    };
+
+    // Exact Apple AirPods Pro 3 RTBuddy open-services + descriptor discovery + HRM_STATE(0x30)=1
+    // + SensorDataWX stream sequence with captured inter-packet timings.
+    sendIfCurrent(RtBuddy::BuildConnectService0Packet());
+
+    QTimer::singleShot(
+        180, this, [sendIfCurrent] { sendIfCurrent(RtBuddy::BuildCapabilitiesService0Packet()); });
+    QTimer::singleShot(
+        400, this, [sendIfCurrent] { sendIfCurrent(RtBuddy::BuildConnectService4Packet()); });
+    QTimer::singleShot(
+        580, this, [sendIfCurrent] { sendIfCurrent(RtBuddy::BuildCapabilitiesService4Packet()); });
+    QTimer::singleShot(680, this, [this, epoch] {
+        std::vector<uint8_t> req;
+        {
+            std::lock_guard<std::mutex> lock{_mutex};
+            if (!_heartRateWanted || !_aapConnected || _heartRateEpoch != epoch ||
+                !_controlTransport->IsConnected())
+            {
+                return;
+            }
+            req = RtBuddy::BuildRequestAllDescriptorsPacket(NextRtBuddySeqLocked());
+        }
+        _controlTransport->SendPacket(req);
+    });
+    QTimer::singleShot(
+        800, this, [sendIfCurrent] { sendIfCurrent(RtBuddy::BuildHrmStatePacket(true)); });
+
+    int delayMs = 920;
+    for (const uint8_t svc : services) {
+        QTimer::singleShot(delayMs, this, [this, epoch, svc] {
+            std::vector<uint8_t> pkt;
+            {
+                std::lock_guard<std::mutex> lock{_mutex};
+                if (!_heartRateWanted || !_aapConnected || _heartRateEpoch != epoch ||
+                    !_controlTransport->IsConnected())
+                {
+                    return;
+                }
+                pkt = RtBuddy::BuildServiceReportIntervalPacket(
+                    NextRtBuddySeqLocked(), svc, RtBuddy::kDefaultReportPeriodUs);
+            }
+            _controlTransport->SendPacket(pkt);
+        });
+        delayMs += 120;
+    }
+
+    // Arm the 12-second watchdog once the stream start packets have gone out.
+    _heartRateWatchdog.start(13200);
+}
+
+void Manager::StopHeartRateWire()
+{
+    std::vector<std::vector<uint8_t>> packets;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_aapConnected || !_controlTransport->IsConnected()) {
+            return;
+        }
+        for (const uint8_t svc : _rtBuddyParser.TargetHeartRateServices()) {
+            packets.push_back(
+                RtBuddy::BuildServiceReportIntervalPacket(NextRtBuddySeqLocked(), svc, 0));
+        }
+        packets.push_back(RtBuddy::BuildHrmStatePacket(false));
+    }
+
+    for (const auto &pkt : packets) {
+        _controlTransport->SendPacket(pkt);
+    }
+}
+
+void Manager::UpdateHeartRateStatus(HeartRateStatus status)
+{
+    PendingStateSignals pending;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_deviceConnected) {
+            return;
+        }
+        if (auto u = _stateMgr.OnAapMessage(
+                Aap::HeartRateStatusNotification{.status = status}, _boundModel);
+            u.has_value())
+        {
+            pending = PrepareStateChangedLocked(std::move(u.value()));
+        }
+    }
+    EmitStateSignals(pending);
+}
+
+void Manager::OnHeartRateWatchdogTimeout()
+{
+    constexpr int kMaxAttempts = 3;
+    int attempt = 0;
+    bool stillValid = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_heartRateWanted || _heartRatePausedOutOfEar || !_aapConnected ||
+            !_controlTransport->IsConnected())
+        {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (_lastHeartRateSampleTime != std::chrono::steady_clock::time_point{} &&
+            now - _lastHeartRateSampleTime < std::chrono::seconds{11})
+        {
+            _heartRateWatchdog.start(12000);
+            return;
+        }
+        stillValid = true;
+        attempt = _heartRateAttempt;
+    }
+
+    if (!stillValid) {
+        return;
+    }
+
+    StopHeartRateWire();
+    if (attempt < kMaxAttempts) {
+        LOG(Warn, "AAP heart rate: no locked optical sample within 12 s; retrying ({}/{}).",
+            attempt + 1, kMaxAttempts);
+        UpdateHeartRateStatus(HeartRateStatus::Starting);
+        QTimer::singleShot(350, this, [this] { StartHeartRateCampaignLater(false); });
+    }
+    else {
+        LOG(Warn, "AAP heart rate: no optical pulse lock after {} attempts; pausing sensor.",
+            kMaxAttempts);
+        UpdateHeartRateStatus(HeartRateStatus::NoSignal);
+    }
+}
+
+void Manager::ArmConversationSpeechSafetyLater(uint8_t level)
+{
+    QMetaObject::invokeMethod(
+        this,
+        [this, level] {
+            if (level == 0 || level >= 8) {
+                _convSpeechSafetyTimer.stop();
+            }
+            else if (level <= 2) {
+                // Safety fallback if a disconnect or RF glitch drops the recovery packet.
+                _convSpeechSafetyTimer.start(15000);
+            }
+            else {
+                // AirPods often stop at an intermediate recovery level (3..7) without sending 8/9.
+                _convSpeechSafetyTimer.start(2200);
+            }
+        },
+        Qt::QueuedConnection);
+}
+
+void Manager::OnConversationSpeechSafetyTimeout()
+{
+    PendingStateSignals pending;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_deviceConnected) {
+            return;
+        }
+        if (auto u = _stateMgr.OnAapMessage(
+                Aap::ConversationalAwarenessSpeechNotification{.speaking = false, .level = 9},
+                _boundModel);
+            u.has_value())
+        {
+            pending = PrepareStateChangedLocked(std::move(u.value()));
+        }
+    }
+    EmitStateSignals(pending);
+    emit ConversationAwarenessLevelChanged(0);
+}
+
+auto Manager::PrepareStateChangedLocked(Details::StateManager::UpdateEvent updateEvent)
+    -> PendingStateSignals
 {
     const auto &oldState = updateEvent.oldState;
     auto &newState = updateEvent.newState;
 
-    newState.displayName = Details::ResolveDisplayName(_deviceName, newState.model);
+    if (newState.displayName.isEmpty()) {
+        newState.displayName = Details::ResolveDisplayName(_deviceName, newState.model);
+    }
 
-    emit StateUpdated(newState);
+    PendingStateSignals pending;
+    pending.state = newState;
 
-    bool newLidOpened = newState.caseBox.isLidOpened && newState.caseBox.isBothPodsInCase;
+    const bool newLidOpened = newState.caseBox.isLidOpened && newState.caseBox.isBothPodsInCase;
     bool lidStateSwitched;
     if (!oldState.has_value()) {
         lidStateSwitched = newLidOpened;
     }
     else {
-        bool oldLidOpened = oldState->caseBox.isLidOpened && oldState->caseBox.isBothPodsInCase;
+        const bool oldLidOpened =
+            oldState->caseBox.isLidOpened && oldState->caseBox.isBothPodsInCase;
         lidStateSwitched = oldLidOpened != newLidOpened;
     }
     if (lidStateSwitched) {
-        OnLidOpened(newLidOpened);
+        pending.lidToggled = newLidOpened;
     }
+    return pending;
 }
 
-void Manager::OnLidOpened(bool opened)
+void Manager::EmitStateSignals(const PendingStateSignals &pending)
 {
-    emit LidToggled(opened);
+    if (pending.state.has_value()) {
+        emit StateUpdated(pending.state.value());
+    }
+    if (pending.lidToggled.has_value()) {
+        emit LidToggled(pending.lidToggled.value());
+    }
 }
 
 bool Manager::OnAdvertisementReceived(const Bluetooth::AdvertisementWatcher::ReceivedData &data)
@@ -254,73 +1691,159 @@ bool Manager::OnAdvertisementReceived(const Bluetooth::AdvertisementWatcher::Rec
     }
 
     Details::Advertisement adv{data};
+    PendingStateSignals pendingState;
+    PendingNearbySignals pendingNearby;
+    bool handledConnected = false;
 
-    if (!_deviceConnected) {
-        if (_scanWhileDisconnected) {
-            OnAdvertisementWhileDisconnected(adv);
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_deviceConnected) {
+            if (_scanWhileDisconnected || _showNearbyWhenDisconnected) {
+                pendingNearby = OnAdvertisementWhileDisconnectedLocked(adv);
+            }
+            else {
+                LOG(Trace, "AirPods advertisement received, but device disconnected.");
+            }
+        }
+        else if (_boundModel != Model::Unknown && adv.GetAdvState().model != _boundModel) {
+            LOG(Trace, "Ignore advertisement for a model other than the bound device.");
         }
         else {
-            LOG(Trace, "AirPods advertisement received, but device disconnected.");
+            _lastRssi = data.rssi;
+            _lastAdvHex = Helper::ToString(adv.GetDesensitizedData());
+            LOG(Trace, "AirPods advertisement received. Data: {}, Address Hash: {}, RSSI: {}",
+                _lastAdvHex.toStdString(), Helper::Hash(data.address), data.rssi);
+
+            if (auto optUpdateEvent = _stateMgr.OnAdvReceived(std::move(adv));
+                optUpdateEvent.has_value())
+            {
+                pendingState = PrepareStateChangedLocked(std::move(optUpdateEvent.value()));
+            }
+            handledConnected = true;
         }
-        return false;
     }
 
-    if (_boundModel != Model::Unknown && adv.GetAdvState().model != _boundModel) {
-        LOG(Trace, "Ignore advertisement for a model other than the bound device.");
-        return false;
+    if (pendingNearby.lidOpenedNearby) {
+        emit LidOpenedNearby();
     }
-
-    LOG(Trace, "AirPods advertisement received. Data: {}, Address Hash: {}, RSSI: {}",
-        Helper::ToString(adv.GetDesensitizedData()), Helper::Hash(data.address), data.rssi);
-
-    auto optUpdateEvent = _stateMgr.OnAdvReceived(std::move(adv));
-    if (optUpdateEvent.has_value()) {
-        OnStateChanged(std::move(optUpdateEvent.value()));
+    if (pendingNearby.nearbyState.has_value()) {
+        emit NearbyStateUpdated(pendingNearby.nearbyState.value(), pendingNearby.shouldAutoShow);
     }
-    return true;
+    if (pendingNearby.scheduleExpiry || handledConnected) {
+        ScheduleExpiryTimerLater();
+    }
+    EmitStateSignals(pendingState);
+    return handledConnected;
 }
 
-void Manager::OnAdvertisementWhileDisconnected(const Details::Advertisement &adv)
+auto Manager::OnAdvertisementWhileDisconnectedLocked(const Details::Advertisement &adv)
+    -> PendingNearbySignals
 {
-    // Random addresses make the bound pair unidentifiable, so this is the same heuristic
-    // the state manager uses: the right model, close enough. Nothing here reaches the
-    // state manager -- the device is not connected, and the popup must not light up.
-    const auto &state = adv.GetAdvState();
-    if (_boundModel != Model::Unknown && state.model != _boundModel) {
-        return;
+    PendingNearbySignals out;
+
+    const auto &advState = adv.GetAdvState();
+    if (_boundModel != Model::Unknown && advState.model != _boundModel) {
+        return out;
     }
     if (adv.GetRssi() < _rssiMin) {
-        return;
-    }
-    if (!state.caseBox.isLidOpened || !state.caseBox.isBothPodsInCase) {
-        return;
+        return out;
     }
 
-    LOG(Trace, "The bound model's case is open nearby while disconnected. RSSI: {}", adv.GetRssi());
-    emit LidOpenedNearby();
+    // Bit 3 of the lid byte is only meaningful when the case is participating in the
+    // broadcast (both buds in case or case battery reported). While both buds are worn out of
+    // the case, Apple clears the bit and sets case battery to 0x0F (unavailable).
+    const bool caseLidOpen = advState.caseBox.isLidOpened && (advState.caseBox.isBothPodsInCase ||
+                                                              advState.caseBox.battery.Available());
+    const bool lidCounterChanged = caseLidOpen && _lastNearbyLidCounter.has_value() &&
+                                   _lastNearbyLidCounter.value() != advState.lidOpenCounter;
+
+    if (_scanWhileDisconnected && caseLidOpen && advState.caseBox.isBothPodsInCase) {
+        LOG(Trace, "The bound model's case is open nearby while disconnected. RSSI: {}",
+            adv.GetRssi());
+        out.lidOpenedNearby = true;
+    }
+
+    if (!_showNearbyWhenDisconnected) {
+        return out;
+    }
+
+    State nearby = static_cast<const State &>(advState);
+    nearby.isNearbyOtherDevice = true;
+    nearby.caseBox.isLidOpened = caseLidOpen;
+    nearby.displayName = Details::ResolveDisplayName(_deviceName, nearby.model);
+
+    // Merge previously observed opposite-side battery when the broadcast only reports one side.
+    if (_lastNearbyState.has_value() && _lastNearbyState->model == nearby.model) {
+        if (!nearby.pods.left.battery.Available() &&
+            _lastNearbyState->pods.left.battery.Available())
+        {
+            nearby.pods.left = _lastNearbyState->pods.left;
+        }
+        if (!nearby.pods.right.battery.Available() &&
+            _lastNearbyState->pods.right.battery.Available())
+        {
+            nearby.pods.right = _lastNearbyState->pods.right;
+        }
+        if (!nearby.caseBox.battery.Available() && _lastNearbyState->caseBox.battery.Available() &&
+            (caseLidOpen || nearby.caseBox.isBothPodsInCase))
+        {
+            nearby.caseBox.battery = _lastNearbyState->caseBox.battery;
+            nearby.caseBox.isCharging = _lastNearbyState->caseBox.isCharging;
+        }
+    }
+
+    const bool wasActive = _lastNearbyState.has_value();
+    const bool lidJustOpened = (caseLidOpen && !_lastNearbyLidOpen) || lidCounterChanged;
+    const bool stateChanged = !wasActive || _lastNearbyState.value() != nearby;
+
+    _lastNearbySeen = std::chrono::steady_clock::now();
+    _lastNearbyLidOpen = caseLidOpen;
+    if (caseLidOpen) {
+        _lastNearbyLidCounter = advState.lidOpenCounter;
+    }
+    _lastNearbyState = nearby;
+
+    if (stateChanged || lidJustOpened) {
+        out.nearbyState = nearby;
+        out.shouldAutoShow = !wasActive || lidJustOpened;
+    }
+
+    out.scheduleExpiry = true;
+    return out;
 }
 
 void Manager::OnAdvWatcherStateChanged(
     Bluetooth::AdvertisementWatcher::State state, const std::optional<std::string> &optError)
 {
-    switch (state) {
-    case Bluetooth::AdvertisementWatcher::State::Started:
-        emit ScannerAvailabilityChanged(true);
-        LOG(Info, "Bluetooth AdvWatcher started.");
-        break;
+    std::optional<bool> availability;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        switch (state) {
+        case Bluetooth::AdvertisementWatcher::State::Started:
+            availability = true;
+            LOG(Info, "Bluetooth AdvWatcher started.");
+            break;
 
-    case Bluetooth::AdvertisementWatcher::State::Stopped:
-        if (_scannerWanted) {
-            emit ScannerAvailabilityChanged(false);
-            LOG(Warn, "Bluetooth AdvWatcher stopped. Error: '{}'.", optError.value_or("nullopt"));
-        }
-        else {
-            LOG(Info, "Bluetooth AdvWatcher stopped intentionally.");
-        }
-        break;
+        case Bluetooth::AdvertisementWatcher::State::Stopped:
+            if (_scannerWanted) {
+                availability = false;
+                LOG(Warn, "Bluetooth AdvWatcher stopped. Error: '{}'.",
+                    optError.value_or("nullopt"));
+            }
+            else {
+                LOG(Info, "Bluetooth AdvWatcher stopped intentionally.");
+            }
+            break;
 
-    default:
-        FatalError("Unhandled adv watcher state: '{}'", Helper::ToUnderlying(state));
+        default:
+            FatalError(
+                std::format("Unhandled adv watcher state: '{}'", Helper::ToUnderlying(state)),
+                true);
+        }
+    }
+
+    if (availability.has_value()) {
+        emit ScannerAvailabilityChanged(availability.value());
     }
 }
 

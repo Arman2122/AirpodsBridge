@@ -3,17 +3,19 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include <QDialog>
+#include <QWindow>
 
 #include "ui_TaskbarStatus.h"
 
 #include "Source/Core/AirPods.h"
 #include "Source/Core/Settings.h"
 #include "Source/Gui/Utils.h"
-#include "Source/Presentation/Base.h"
 #include "Source/Gui/Widget/Battery.h"
+#include "Source/Presentation/Base.h"
 
 struct TaskBarInfo {
     bool isHorizontal;
@@ -32,7 +34,7 @@ class MiniIcon : public QWidget
     Q_OBJECT
 
 public:
-    inline MiniIcon(QWidget *parent = nullptr)
+    inline MiniIcon(QWidget *parent = nullptr) : QWidget{parent}
     {
         setFixedSize(kSize, kSize);
 
@@ -43,16 +45,19 @@ public:
     inline void SetText(QString text)
     {
         _text = std::move(text);
+        update();
     }
 
     inline void SetBgColor(QColor color)
     {
         _bgColor = std::move(color);
+        update();
     }
 
     inline void SetFgColor(QColor color)
     {
         _fgColor = std::move(color);
+        update();
     }
 
 private:
@@ -65,6 +70,7 @@ private:
 protected:
     inline void paintEvent(QPaintEvent *event) override
     {
+        Q_UNUSED(event);
         QPainter painter{this};
         painter.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
 
@@ -110,6 +116,8 @@ public:
     void Disconnect();
     void Unbind();
     void SetToolTip(const QString &text);
+    void SetTaskbarDark(bool dark);
+    void OnTaskbarCreated();
 
 Q_SIGNALS:
     void OnSettingsChangedSafely(TaskbarStatusBehavior value);
@@ -127,9 +135,10 @@ private:
     Helper::Sides<MiniIcon *> _icon = {new MiniIcon{this}, new MiniIcon{this}};
     Helper::Sides<Widget::Battery *> _battery = {
         new Widget::Battery{this}, new Widget::Battery{this}};
+    std::unique_ptr<QWindow> _rebarWindow;
     TaskbarStatusBehavior _behavior{TaskbarStatusBehavior::Disable};
     bool _isWin11OrGreater{false}, _isActuallyEnabled{false}, _isStateReady{false},
-        _isFirstTimeout{false};
+        _isFirstTimeout{false}, _taskbarDark{true};
     int _cachedLength{0};
     QTimer _updateTimer;
     std::optional<Core::AirPods::State> _airPodsState;
@@ -138,6 +147,7 @@ private:
     bool _drawDebugBorder{false};
 #endif
 
+    void ApplyTaskbarTheme();
     void UpdateVisible();
     bool Enable();
     bool Disable();

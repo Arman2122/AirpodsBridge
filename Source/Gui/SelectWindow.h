@@ -4,8 +4,8 @@
 #pragma once
 
 #include <QDialog>
-#include <QVector>
 #include <QString>
+#include <QStringList>
 
 #include "ui_SelectWindow.h"
 
@@ -21,7 +21,7 @@ public:
     SelectWindow(const QString &title, const QStringList &items, QWidget *parent = nullptr);
 
     bool HasResult() const;
-    int GetSeletedIndex() const;
+    int GetSelectedIndex() const;
 
 private:
     Ui::SelectWindow _ui;

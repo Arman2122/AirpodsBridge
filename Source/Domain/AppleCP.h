@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <span>
 #include <vector>
 
 #include "Source/Domain/Base.h"
@@ -11,8 +15,6 @@
 //
 namespace Core::AppleCP {
 
-#pragma pack(push)
-#pragma pack(1)
 enum class PacketType : uint8_t {
     AirPrint = 0x3,
     AirDrop = 0x5,
@@ -44,48 +46,27 @@ enum class Color : uint8_t {
     Yellow = 0xC,
 };
 
-struct Header {
-    PacketType packetType;
-    uint8_t remainingLength; // Remaining length of this packet
-};
-
 constexpr uint16_t VendorId = 76;
 
-// About "Flipped":
 //
-//      In other similar projects, you may see a variable called "IsFlipped".
+// Bounds-checked, strict-aliasing-safe parser for Apple Continuity Proximity Pairing
+// advertisements (type 0x07).
 //
-//      When this variable is true, you need to return the right earphone data for the left
-//      earphone, and vice versa.
+// Apple BLE manufacturer data (company ID 0x004C) is a sequence of `[type, length, payload]`
+// TLV sub-records. A single advertisement may carry Proximity Pairing alone (27 bytes) or
+// concatenated alongside other Continuity messages such as NearbyInfo. `Parse` walks the
+// TLV stream with explicit bounds checks and extracts fields by byte offset and bitmask
+// rather than casting untrusted radio memory to packed structs.
 //
-//      In my guess, there is no distinction between left and right earphones in the protocol
-//      structure, and the left and right earphones use almost the same program.
-//
-//      So there are no fields named "left" and "right", but "current" and "another" fields
-//      instead.
-//
-//
-// About 2 discoverable devices for 1 AirPods:
-//
-//      So, if you've researched the AirPods protocol, you may have noticed a rather strange
-//      fact.
-//
-//      That is, the only AirPods you have sometimes have two discoverable devices, and
-//      sometimes only one discoverable device.
-//
-//      This is because AirPods currently have two Bluetooth modules in two earphones and none
-//      in the case.
-//
-//      Perhaps for power saving and the battery balancing feature of the two earphones (I'm not
-//      sure if these are the reasons), when both earphones are working or charging at the same
-//      time, only the Bluetooth device in one of the earphones is discoverable, and when only
-//      one earphone is working and the other is charging (lid opened), the Bluetooth device in
-//      both earphones is made discoverable, and the battery of the case is sent and synced.
-//
-class AirPods : Header
+class AirPods
 {
 public:
-    static bool IsValid(const std::vector<uint8_t> &data);
+    static constexpr size_t kPacketSize = 27;
+    static constexpr uint8_t kExpectedRemainingLength = 25;
+    static constexpr size_t kEncryptedPayloadOffset = 11;
+
+    static bool IsValid(std::span<const uint8_t> data);
+    static std::optional<AirPods> Parse(std::span<const uint8_t> data);
     static Core::AirPods::Model GetModel(uint16_t modelId);
 
     Core::AirPods::Side GetBroadcastedSide() const;
@@ -104,6 +85,7 @@ public:
 
     bool IsBothPodsInCase() const;
     bool IsLidOpened() const;
+    uint8_t GetLidOpenCounter() const;
 
     // Apple's colour code for the device: the `CL` of its variant in Apple's own asset
     // catalogue, 0 for white AirPods. Wider than the `Color` enum above, which names only
@@ -114,52 +96,24 @@ public:
     bool IsRightInEar() const;
 
     AirPods Desensitize() const;
+    const std::array<uint8_t, kPacketSize> &RawBytes() const noexcept;
 
 private:
-    uint8_t unk1[1];
-    uint16_t modelId;
-    struct {
-        uint8_t unk4 : 1;
-        uint8_t currInEar : 1;
-        uint8_t bothInCase : 1;
-        uint8_t anotInEar : 1;
-        uint8_t unk6 : 1;
-        uint8_t broadcastFrom : 1; // This advertisement is broadcast from which earphone.
-        uint8_t unk7 : 1;
-        uint8_t unk8 : 1;
-    };
-    struct {
-        uint8_t curr : 4;         // Battery remaining [0, 10], otherwise unavailable
-        uint8_t anot : 4;         // Battery remaining [0, 10], otherwise unavailable
-        uint8_t caseBox : 4;      // Battery remaining [0, 10], otherwise unavailable
-        uint8_t currCharging : 1; // If it's charging (value != 0)
-        uint8_t anotCharging : 1; // If it's charging (value != 0)
-        uint8_t caseCharging : 1; // If it's charging (value != 0)
-        uint8_t unk9 : 1;
-    } battery;
-    struct {
-        uint8_t switchCount : 3; // This count increases if the lid opened or closed once, and
-                                 // resets if overflow or no longer broadcasting advertisements
-        uint8_t closed : 1;
-        uint8_t unk10 : 4;
-    } lid;
-    Color color; // Untested because I don't have a device other than white
-    uint8_t unk11[1];
-    uint8_t unk12[16]; // Hash or encrypted payload
+    std::array<uint8_t, kPacketSize> _raw{};
+
+    explicit AirPods(std::array<uint8_t, kPacketSize> raw) noexcept;
 };
-static_assert(sizeof(AirPods) == 27);
-#pragma pack(pop)
 
 template <class T>
-concept KindOfACPStruct = std::is_base_of_v<Header, T>;
+std::optional<T> As(std::span<const uint8_t> data)
+{
+    return T::Parse(data);
+}
 
-template <KindOfACPStruct T>
+template <class T>
 std::optional<T> As(const std::vector<uint8_t> &data)
 {
-    if (!T::IsValid(data)) {
-        return std::nullopt;
-    }
-
-    return *(T *)data.data();
+    return T::Parse(std::span<const uint8_t>{data});
 }
+
 } // namespace Core::AppleCP

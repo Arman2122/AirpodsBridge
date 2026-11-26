@@ -4,6 +4,7 @@
 #pragma once
 
 #include <thread>
+
 #include <QDialog>
 
 #include "Source/Core/Update.h"
@@ -21,7 +22,8 @@ public:
     ~DownloadWindow();
 
 Q_SIGNALS:
-    void UpdateProgressSafely(int downloaded, int total);
+    void UpdateProgressSafely(int progressPercent);
+    void OnSucceededSafely();
     void OnFailedSafely();
 
 private:
@@ -30,11 +32,10 @@ private:
     Core::Update::ReleaseInfo _info;
     std::jthread _downloadThread;
 
-    void UpdateProgress(int downloaded, int total);
+    void UpdateProgress(int progressPercent);
+    void OnSucceeded();
     void OnFailed();
 
     void DownloadThread(std::stop_token stopToken);
-
-    UTILS_QT_DISABLE_ESC_QUIT(QDialog);
 };
 } // namespace Gui

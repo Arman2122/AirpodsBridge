@@ -6,19 +6,25 @@
 #include <array>
 #include <cstdlib>
 
+#include <QClipboard>
 #include <QDesktopServices>
 #include <QEvent>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QMessageBox>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include <Config.h>
 
 #include "Source/Core/Debug.h"
+#include "Source/Gui/Widget/AppleNoiseControl.h"
 #include "Source/Gui/Widget/ComboBox.h"
+#include "Source/Gui/Widget/HeartRateCard.h"
 #include "Source/Gui/Widget/Label.h"
+#include "Source/Gui/Widget/ProgressBar.h"
 #include "Source/Gui/Widget/PushButton.h"
 #include "Source/Gui/Widget/ScrollArea.h"
 #include "Source/Gui/Widget/SegmentedControl.h"
@@ -28,6 +34,7 @@
 #include "Source/Gui/Widget/Toggle.h"
 #include "Source/Presentation/Theme.h"
 #include "Source/Support/Logger.h"
+#include "Source/Support/Utils.h"
 
 namespace Gui {
 
@@ -53,6 +60,8 @@ constexpr std::array<uint32_t, 3> kLowBatteryLevels{10, 20, 30};
 // radio can hear at all.
 constexpr int kRangeSliderMin = 50;
 constexpr int kRangeSliderMax = 100;
+constexpr int kVolumeCapMin = 40;
+constexpr int kVolumeCapMax = 100;
 
 template <class T>
 void WriteSetting(T Fields::*field, T value)
@@ -65,6 +74,36 @@ void WriteSetting(T Fields::*field, T value)
 }
 
 using Refresher = std::function<void(const Fields &)>;
+
+void BindHotkeyCombo(
+    Widget::ComboBox *combo, QString Fields::*field, const QStringList &presets,
+    std::vector<Refresher> &refreshers)
+{
+    combo->setMinimumWidth(180);
+    combo->addItem(QObject::tr("Off"), QString{});
+    for (const auto &preset : presets) {
+        combo->addItem(preset, preset);
+    }
+
+    QObject::connect(
+        combo, qOverload<int>(&QComboBox::currentIndexChanged), combo, [combo, field](int idx) {
+            if (idx < 0) {
+                return;
+            }
+            WriteSetting(field, combo->itemData(idx).toString());
+        });
+
+    refreshers.push_back([combo, field](const Fields &fields) {
+        const QSignalBlocker blocker{combo};
+        const QString val = (fields.*field).trimmed();
+        int idx = combo->findData(val);
+        if (idx < 0 && !val.isEmpty()) {
+            combo->addItem(val, val);
+            idx = combo->count() - 1;
+        }
+        combo->setCurrentIndex(idx >= 0 ? idx : 0);
+    });
+}
 
 void BindToggle(Widget::Toggle *toggle, bool Fields::*field, std::vector<Refresher> &refreshers)
 {
@@ -180,6 +219,7 @@ constexpr Library kLibraries[] = {
     { "magic_enum", "https://github.com/Neargye/magic_enum", "MIT", "https://github.com/Neargye/magic_enum/blob/master/LICENSE" },
     { "stacktrace", "https://github.com/boostorg/stacktrace", "BSL-1.0", "https://www.boost.org/LICENSE_1_0.txt" },
     { "Inter", "https://rsms.me/inter/", "SIL OFL 1.1", "https://github.com/rsms/inter/blob/master/LICENSE.txt" },
+    { "usbip-win2", "https://github.com/vadimgrn/usbip-win2", "BSD-2-Clause", "https://github.com/vadimgrn/usbip-win2/blob/master/LICENSE" },
     // clang-format on
 };
 
@@ -233,6 +273,9 @@ SettingsWindow::SettingsWindow(Core::QuickConnect::Controller &quickConnect, QWi
     };
     addPage(Section::General, tr("General"), BuildGeneralPage());
     addPage(Section::Display, tr("Popup & tray"), BuildDisplayPage());
+    addPage(Section::Control, tr("AirPods control"), BuildControlPage());
+    addPage(Section::Health, tr("Health"), BuildHealthPage());
+    addPage(Section::Audio, tr("Audio & shortcuts"), BuildAudioPage());
     addPage(Section::Features, tr("Features"), BuildFeaturesPage());
     addPage(Section::About, tr("About"), BuildAboutPage());
 #if defined APB_DEBUG
@@ -333,6 +376,12 @@ QWidget *SettingsWindow::BuildGeneralPage()
         checkForUpdates);
     BindToggle(checkForUpdates, &Fields::check_for_updates, _refreshers);
 
+    auto *nativeToasts = new Widget::Toggle;
+    startup->AddRow(
+        tr("Windows toast notifications"), meta.native_toast_notifications.Description(),
+        nativeToasts);
+    BindToggle(nativeToasts, &Fields::native_toast_notifications, _refreshers);
+
     auto *appearance = new Widget::SettingsGroup{tr("Appearance"), column};
 
     auto *theme = new Widget::SegmentedControl;
@@ -344,10 +393,24 @@ QWidget *SettingsWindow::BuildGeneralPage()
 
     auto *device = new Widget::SettingsGroup{tr("AirPods"), column};
 
-    _unbind = MakeButton(tr("Unbind"), column);
-    _bindingRow = device->AddRow(tr("Bound device"), {}, _unbind);
+    auto *bindControls = new QWidget{column};
+    auto *bindLayout = new QHBoxLayout{bindControls};
+    bindLayout->setContentsMargins(0, 0, 0, 0);
+    bindLayout->setSpacing(8);
+
+    _bindButton = MakeButton(tr("Bind"), bindControls);
+    _bindButton->setMinimumWidth(84);
+    _unbind = MakeButton(tr("Unbind"), bindControls);
+    _unbind->setMinimumWidth(84);
+    bindLayout->addWidget(_bindButton);
+    bindLayout->addWidget(_unbind);
+
+    _bindingRow = device->AddRow(tr("Bound device"), {}, bindControls);
+    connect(_bindButton, &QPushButton::clicked, this, [this] { emit BindDeviceRequested(); });
     connect(_unbind, &QPushButton::clicked, this, [this] {
-        WriteSetting(&Fields::device_address, uint64_t{0});
+        auto settings = ModifiableAccess();
+        settings->device_address = 0;
+        settings->bound_device_name.clear();
         RefreshBinding(GetCurrent());
     });
 
@@ -398,6 +461,12 @@ QWidget *SettingsWindow::BuildDisplayPage()
         showOnLidOpen);
     BindToggle(showOnLidOpen, &Fields::show_popup_on_lid_open, _refreshers);
 
+    auto *showNearby = new Widget::Toggle;
+    popup->AddRow(
+        tr("Show nearby popup when disconnected"),
+        meta.show_nearby_popup_when_disconnected.Description(), showNearby);
+    BindToggle(showNearby, &Fields::show_nearby_popup_when_disconnected, _refreshers);
+
     auto *battery = new Widget::SettingsGroup{tr("Battery level"), column};
 
     auto *trayBattery = new Widget::SegmentedControl;
@@ -416,6 +485,407 @@ QWidget *SettingsWindow::BuildDisplayPage()
 
     column->layout()->addWidget(popup);
     column->layout()->addWidget(battery);
+    return column;
+}
+
+QWidget *SettingsWindow::BuildControlPage()
+{
+    const auto &meta = GetConstMetaFields();
+    auto *column = MakeColumn(this);
+
+    auto *engine = new Widget::SettingsGroup{tr("Control engine (no Test Mode)"), column};
+
+    _radioPrimaryButton = MakeButton(tr("Enable"), column);
+    _radioPrimaryButton->SetPrimary(true);
+    _radioStatusRow = engine->AddRow(
+        tr("Radio proxy service"),
+        tr("Uses Windows' built-in WinUSB driver and signed usbip-win2 to unlock full two-way "
+           "AirPods controls while Secure Boot stays on."),
+        _radioPrimaryButton);
+    connect(_radioPrimaryButton, &QPushButton::clicked, this, [this] {
+        SetRadioSetupBusy(
+            true, tr("Approve the Windows administrator prompt to configure the engine..."));
+        emit RadioServiceActionRequested(_radioPrimaryAction);
+    });
+
+    _radioProgressContainer = new QWidget{column};
+    auto *progressLayout = new QVBoxLayout{_radioProgressContainer};
+    progressLayout->setContentsMargins(
+        Theme::Metric::RowPaddingH, 8, Theme::Metric::RowPaddingH, 10);
+    progressLayout->setSpacing(0);
+    _radioProgressBar = new Widget::ProgressBar{_radioProgressContainer};
+    progressLayout->addWidget(_radioProgressBar);
+    _radioProgressContainer->hide();
+    engine->AddWidget(_radioProgressContainer);
+
+    _radioRestoreButton = MakeButton(tr("Restore native"), column);
+    _radioRestoreButton->setEnabled(false);
+    _radioAdapterRow = engine->AddRow(
+        tr("Bluetooth adapter"), tr("Not active. Standard Windows Bluetooth driver is in use."),
+        _radioRestoreButton);
+    connect(_radioRestoreButton, &QPushButton::clicked, this, [this] {
+        SetRadioSetupBusy(true, tr("Restoring native Windows Bluetooth driver..."));
+        emit RadioServiceActionRequested(RadioServiceAction::RestoreNative);
+    });
+
+    auto *lowLatencyQos = new Widget::Toggle;
+    engine->AddRow(
+        tr("Low-latency HCI polling"), meta.radio_service_low_latency_qos.Description(),
+        lowLatencyQos);
+    BindToggle(lowLatencyQos, &Fields::radio_service_low_latency_qos, _refreshers);
+
+    auto *hfpDecline = new Widget::Toggle;
+    engine->AddRow(
+        tr("HCI Hands-Free protection"), meta.radio_service_hfp_decline.Description(), hfpDecline);
+    BindToggle(hfpDecline, &Fields::radio_service_hfp_decline, _refreshers);
+
+    auto *virtualMic = new Widget::Toggle;
+    engine->AddRow(
+        tr("Virtual stereo microphone"), meta.radio_service_virtual_mic.Description(), virtualMic);
+    BindToggle(virtualMic, &Fields::radio_service_virtual_mic, _refreshers);
+
+    auto *listening = new Widget::SettingsGroup{tr("Listening & noise control"), column};
+
+    _aapNoiseModeContainer = new QWidget{column};
+    auto *noiseLayout = new QVBoxLayout{_aapNoiseModeContainer};
+    noiseLayout->setContentsMargins(Theme::Metric::RowPaddingH, 12, Theme::Metric::RowPaddingH, 10);
+    noiseLayout->setSpacing(8);
+
+    auto *noiseTitle = MakeLabel(
+        tr("Listening mode"), Theme::Font::Body(), Widget::Label::Role::Primary,
+        _aapNoiseModeContainer);
+    auto *noiseSubtitle = MakeLabel(
+        tr("Drag or tap to switch active noise control directly on your AirPods over AAP L2CAP."),
+        Theme::Font::Footnote(), Widget::Label::Role::Secondary, _aapNoiseModeContainer);
+    noiseSubtitle->setWordWrap(true);
+
+    _aapNoiseControl = new Widget::AppleNoiseControl{
+        Widget::AppleNoiseControl::LayoutMode::CapsuleOnly, _aapNoiseModeContainer};
+    connect(
+        _aapNoiseControl, &Widget::AppleNoiseControl::NoiseControlModeRequested, this,
+        &SettingsWindow::NoiseControlModeRequested);
+    connect(
+        _aapNoiseControl, &Widget::AppleNoiseControl::AdaptiveNoiseLevelRequested, this,
+        &SettingsWindow::AdaptiveNoiseLevelRequested);
+
+    noiseLayout->addWidget(noiseTitle);
+    noiseLayout->addWidget(noiseSubtitle);
+    noiseLayout->addWidget(_aapNoiseControl);
+    listening->AddWidget(_aapNoiseModeContainer);
+
+    _aapConvAwareness = new Widget::Toggle;
+    _aapConvAwarenessRow = listening->AddRow(
+        tr("Conversation awareness"),
+        tr("Lowers media volume and enhances nearby voices automatically when you start speaking."),
+        _aapConvAwareness);
+    connect(_aapConvAwareness, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit ConversationalAwarenessRequested(checked);
+    });
+
+    auto *adaptiveControl = new QWidget{column};
+    auto *adaptiveLayout = new QHBoxLayout{adaptiveControl};
+    adaptiveLayout->setContentsMargins(0, 0, 0, 0);
+    adaptiveLayout->setSpacing(10);
+    _aapAdaptiveSlider = new Widget::Slider{adaptiveControl};
+    _aapAdaptiveSlider->setRange(0, 100);
+    _aapAdaptiveSlider->setFixedWidth(150);
+    _aapAdaptiveValue = MakeLabel(
+        QStringLiteral("50%"), Theme::Font::Caption(), Widget::Label::Role::Secondary,
+        adaptiveControl);
+    _aapAdaptiveValue->setFixedWidth(36);
+    _aapAdaptiveValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    adaptiveLayout->addWidget(_aapAdaptiveSlider);
+    adaptiveLayout->addWidget(_aapAdaptiveValue);
+    _aapAdaptiveRow = listening->AddRow(
+        tr("Adaptive audio level"),
+        tr("Controls how much ambient noise Adaptive Audio allows through."), adaptiveControl);
+    connect(_aapAdaptiveSlider, &QSlider::valueChanged, this, [this](int val) {
+        _aapAdaptiveValue->setText(QStringLiteral("%1%").arg(val));
+        emit AdaptiveNoiseLevelRequested(static_cast<uint8_t>(val));
+    });
+
+    _aapOneBudAnc = new Widget::Toggle;
+    _aapOneBudAncRow = listening->AddRow(
+        tr("Noise cancellation with one AirPod"),
+        tr("Allows Active Noise Cancellation when only a single AirPod is worn."), _aapOneBudAnc);
+    connect(_aapOneBudAnc, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit OneBudAncRequested(checked);
+    });
+
+    _aapPersonalizedVol = new Widget::Toggle;
+    _aapPersonalizedVolRow = listening->AddRow(
+        tr("Personalized volume"),
+        tr("Adjusts media playback volume in response to your surroundings."), _aapPersonalizedVol);
+    connect(_aapPersonalizedVol, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit PersonalizedVolumeRequested(checked);
+    });
+
+    _aapLoudSound = new Widget::Toggle;
+    _aapLoudSoundRow = listening->AddRow(
+        tr("Loud sound reduction"),
+        tr("Attenuates sudden loud environmental noises while in Transparency or Adaptive mode."),
+        _aapLoudSound);
+    connect(_aapLoudSound, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit LoudSoundReductionRequested(checked);
+    });
+
+    _aapAllowOff = new Widget::Toggle;
+    _aapAllowOffRow = listening->AddRow(
+        tr("Allow \"Off\" listening mode"),
+        tr("Includes Off in the stem press-and-hold listening mode cycle (AirPods Pro 2 & 3)."),
+        _aapAllowOff);
+    connect(_aapAllowOff, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit AllowOffListeningModeRequested(checked);
+    });
+
+    auto *device = new Widget::SettingsGroup{tr("Device, microphone & hearing"), column};
+
+    _aapMicSide = new Widget::SegmentedControl;
+    _aapMicSide->AddSegment(tr("Auto"));
+    _aapMicSide->AddSegment(tr("Left"));
+    _aapMicSide->AddSegment(tr("Right"));
+    _aapMicSideRow = device->AddRow(
+        tr("Microphone side"),
+        tr("Choose whether AirPods automatically switch microphones or stay on one side."),
+        _aapMicSide);
+    connect(_aapMicSide, &Widget::SegmentedControl::CurrentIndexChanged, this, [this](int idx) {
+        if (idx >= 0 && idx <= 2) {
+            emit MicrophoneSideRequested(static_cast<Core::AirPods::MicrophoneSide>(idx));
+        }
+    });
+
+    _aapPressSpeed = new Widget::SegmentedControl;
+    _aapPressSpeed->AddSegment(tr("Default"));
+    _aapPressSpeed->AddSegment(tr("Slower"));
+    _aapPressSpeed->AddSegment(tr("Slowest"));
+    _aapPressSpeedRow = device->AddRow(
+        tr("Press speed"),
+        tr("Adjusts how quickly you must press the AirPods stem for double or triple press."),
+        _aapPressSpeed);
+    connect(_aapPressSpeed, &Widget::SegmentedControl::CurrentIndexChanged, this, [this](int idx) {
+        if (idx >= 0 && idx <= 2) {
+            emit PressSpeedRequested(static_cast<Core::AirPods::PressSpeed>(idx));
+        }
+    });
+
+    _aapPressHold = new Widget::SegmentedControl;
+    _aapPressHold->AddSegment(tr("Default"));
+    _aapPressHold->AddSegment(tr("Shorter"));
+    _aapPressHold->AddSegment(tr("Shortest"));
+    _aapPressHoldRow = device->AddRow(
+        tr("Press & hold duration"),
+        tr("Adjusts how long you press and hold the stem to switch listening modes."),
+        _aapPressHold);
+    connect(_aapPressHold, &Widget::SegmentedControl::CurrentIndexChanged, this, [this](int idx) {
+        if (idx >= 0 && idx <= 2) {
+            emit PressHoldDurationRequested(static_cast<Core::AirPods::PressHoldDuration>(idx));
+        }
+    });
+
+    auto *toneControl = new QWidget{column};
+    auto *toneLayout = new QHBoxLayout{toneControl};
+    toneLayout->setContentsMargins(0, 0, 0, 0);
+    toneLayout->setSpacing(10);
+    _aapToneVolumeSlider = new Widget::Slider{toneControl};
+    _aapToneVolumeSlider->setRange(15, 100);
+    _aapToneVolumeSlider->setFixedWidth(150);
+    _aapToneVolumeValue = MakeLabel(
+        QStringLiteral("100%"), Theme::Font::Caption(), Widget::Label::Role::Secondary,
+        toneControl);
+    _aapToneVolumeValue->setFixedWidth(36);
+    _aapToneVolumeValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    toneLayout->addWidget(_aapToneVolumeSlider);
+    toneLayout->addWidget(_aapToneVolumeValue);
+    _aapToneVolumeRow = device->AddRow(
+        tr("Tone volume"), tr("Adjusts volume of AirPods chimes and battery alerts."), toneControl);
+    connect(_aapToneVolumeSlider, &QSlider::valueChanged, this, [this](int val) {
+        _aapToneVolumeValue->setText(QStringLiteral("%1%").arg(val));
+        emit ToneVolumeRequested(static_cast<uint8_t>(val));
+    });
+
+    _aapHeadGestures = new Widget::Toggle;
+    _aapHeadGesturesRow = device->AddRow(
+        tr("Head gestures"), tr("Nod or shake your head to respond to calls and announcements."),
+        _aapHeadGestures);
+    connect(_aapHeadGestures, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit HeadGesturesRequested(checked);
+    });
+
+    _aapHearingAid = new Widget::Toggle;
+    _aapHearingAidRow = device->AddRow(
+        tr("Hearing Aid"),
+        tr("Enables Hearing Aid assistance configured on your iPhone or iPad (AirPods Pro 2 & 3)."),
+        _aapHearingAid);
+    connect(_aapHearingAid, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit HearingAidRequested(checked);
+    });
+
+    _aapMediaAssist = new Widget::Toggle;
+    _aapMediaAssistRow = device->AddRow(
+        tr("Media Assist"),
+        tr("Applies your personalized audiogram profile to music, video, and calls."),
+        _aapMediaAssist);
+    connect(_aapMediaAssist, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit MediaAssistRequested(checked);
+    });
+
+    column->layout()->addWidget(engine);
+    column->layout()->addWidget(listening);
+    column->layout()->addWidget(device);
+    return column;
+}
+
+QWidget *SettingsWindow::BuildHealthPage()
+{
+    const auto &meta = GetConstMetaFields();
+    auto *column = MakeColumn(this);
+
+    auto *liveGroup = new Widget::SettingsGroup{tr("Heart Rate"), column};
+    _aapHeartRateCard = new Widget::HeartRateCard{column};
+    liveGroup->AddWidget(_aapHeartRateCard);
+
+    auto *sensorGroup = new Widget::SettingsGroup{tr("Optical heart rate sensor"), column};
+
+    _aapHeartRate = new Widget::Toggle;
+    _aapHeartRateRow = sensorGroup->AddRow(
+        tr("Heart rate sensor"),
+        tr("Monitors live optical heart rate telemetry over Apple RTBuddy (AAP 0x17) while worn."),
+        _aapHeartRate);
+    connect(_aapHeartRate, &QAbstractButton::toggled, this, [this](bool checked) {
+        emit HeartRateMonitoringRequested(checked);
+    });
+
+    auto *showInPopup = new Widget::Toggle;
+    sensorGroup->AddRow(
+        tr("Show Heart Rate bar in popup"), meta.show_heart_rate_in_popup.Description(),
+        showInPopup);
+    BindToggle(showInPopup, &Fields::show_heart_rate_in_popup, _refreshers);
+
+    _aapHeartRateTelemetryRow = sensorGroup->AddRow(
+        tr("Sensor status"),
+        tr("Connect AirPods Pro 3 or Powerbeats Pro 2 with the Radio Proxy Service active."),
+        nullptr);
+
+    column->layout()->addWidget(liveGroup);
+    column->layout()->addWidget(sensorGroup);
+    return column;
+}
+
+QWidget *SettingsWindow::BuildAudioPage()
+{
+    const auto &meta = GetConstMetaFields();
+    auto *column = MakeColumn(this);
+
+    auto *audio = new Widget::SettingsGroup{tr("Audio protection"), column};
+
+    _preferredMic = new Widget::ComboBox;
+    _preferredMic->setMinimumWidth(220);
+    audio->AddRow(
+        tr("Preferred microphone"), meta.preferred_mic_device_id.Description(), _preferredMic);
+    connect(
+        _preferredMic, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+            if (index < 0) {
+                return;
+            }
+            WriteSetting(
+                &Fields::preferred_mic_device_id, _preferredMic->itemData(index).toString());
+        });
+
+    auto *autoSwitchAudio = new Widget::Toggle;
+    audio->AddRow(
+        tr("Switch audio on connect"), meta.auto_switch_audio_on_connect.Description(),
+        autoSwitchAudio);
+    BindToggle(autoSwitchAudio, &Fields::auto_switch_audio_on_connect, _refreshers);
+
+    auto *smartRoute = new Widget::Toggle;
+    audio->AddRow(
+        tr("Switch output when worn"), meta.smart_audio_routing.Description(), smartRoute);
+    BindToggle(smartRoute, &Fields::smart_audio_routing, _refreshers);
+
+    _volumeCapToggle = new Widget::Toggle;
+    audio->AddRow(
+        tr("Limit reconnect volume"), meta.volume_cap_enabled.Description(), _volumeCapToggle);
+    BindToggle(_volumeCapToggle, &Fields::volume_cap_enabled, _refreshers);
+
+    _volumeCapSlider = new Widget::Slider;
+    _volumeCapSlider->setRange(kVolumeCapMin, kVolumeCapMax);
+    _volumeCapSlider->setTracking(false);
+    _volumeCapValue = MakeLabel({}, Theme::Font::Caption(), Widget::Label::Role::Secondary, column);
+    _volumeCapValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    _volumeCapValue->setFixedWidth(48);
+
+    auto *capControl = new QWidget{column};
+    auto *capLayout = new QHBoxLayout{capControl};
+    capLayout->setContentsMargins(0, 0, 0, 0);
+    capLayout->setSpacing(12);
+    capLayout->addWidget(_volumeCapSlider, 1);
+    capLayout->addWidget(_volumeCapValue);
+    capControl->setFixedWidth(240);
+
+    _volumeCapSliderRow =
+        audio->AddRow(tr("Maximum volume"), meta.volume_cap_level.Description(), capControl);
+    connect(_volumeCapSlider, &QSlider::sliderMoved, this, [this](int value) {
+        _volumeCapValue->setText(QStringLiteral("%1%").arg(value));
+    });
+    connect(_volumeCapSlider, &QSlider::valueChanged, this, [this](int value) {
+        _volumeCapValue->setText(QStringLiteral("%1%").arg(value));
+        WriteSetting(&Fields::volume_cap_level, static_cast<uint32_t>(value));
+    });
+    connect(_volumeCapToggle, &QAbstractButton::toggled, this, [this](bool enabled) {
+        _volumeCapSliderRow->setEnabled(enabled);
+    });
+
+    auto *latency = new Widget::SettingsGroup{tr("Low-latency & gaming"), column};
+
+    auto *keepAlive = new Widget::Toggle;
+    latency->AddRow(tr("Keep audio stream awake"), meta.audio_keep_alive.Description(), keepAlive);
+    BindToggle(keepAlive, &Fields::audio_keep_alive, _refreshers);
+
+    _latencyModeButton = MakeButton(tr("Gaming mode (SBC)"), column);
+    _latencyProfileRow = latency->AddRow(
+        tr("Bluetooth codec & effects"),
+        tr("Switches BthA2dp to SBC and disables Audio Enhancements (admin prompt)."),
+        _latencyModeButton);
+    connect(_latencyModeButton, &QPushButton::clicked, this, [this] {
+        _latencyModeButton->setEnabled(false);
+        _latencyModeButton->setText(tr("Applying..."));
+        emit LatencyProfileSwitchRequested(_latencyTargetLowLatency);
+        // Real updates arrive immediately via LatencyDiagnosticsChanged once the native
+        // elevated helper completes; this timeout is purely a fallback safety net.
+        QTimer::singleShot(15000, this, [this] { RefreshLatencyDiagnostics(); });
+    });
+
+    auto *shortcuts = new Widget::SettingsGroup{tr("Global shortcuts"), column};
+
+    auto *hkConnect = new Widget::ComboBox;
+    shortcuts->AddRow(
+        tr("Connect / disconnect"), meta.hotkey_toggle_connect.Description(), hkConnect);
+    BindHotkeyCombo(
+        hkConnect, &Fields::hotkey_toggle_connect,
+        {QStringLiteral("Ctrl+Alt+A"), QStringLiteral("Ctrl+Alt+C"), QStringLiteral("Ctrl+Shift+A"),
+         QStringLiteral("Ctrl+Alt+F9")},
+        _refreshers);
+
+    auto *hkPopup = new Widget::ComboBox;
+    shortcuts->AddRow(tr("Toggle battery popup"), meta.hotkey_toggle_popup.Description(), hkPopup);
+    BindHotkeyCombo(
+        hkPopup, &Fields::hotkey_toggle_popup,
+        {QStringLiteral("Ctrl+Alt+B"), QStringLiteral("Ctrl+Alt+P"), QStringLiteral("Ctrl+Shift+B"),
+         QStringLiteral("Ctrl+Alt+F10")},
+        _refreshers);
+
+    auto *hkNoise = new Widget::ComboBox;
+    shortcuts->AddRow(
+        tr("Cycle noise control"), meta.hotkey_cycle_noise_control.Description(), hkNoise);
+    BindHotkeyCombo(
+        hkNoise, &Fields::hotkey_cycle_noise_control,
+        {QStringLiteral("Ctrl+Alt+N"), QStringLiteral("Ctrl+Shift+N"), QStringLiteral("Ctrl+Alt+M"),
+         QStringLiteral("Ctrl+Alt+F11")},
+        _refreshers);
+
+    column->layout()->addWidget(audio);
+    column->layout()->addWidget(latency);
+    column->layout()->addWidget(shortcuts);
     return column;
 }
 
@@ -466,6 +936,11 @@ QWidget *SettingsWindow::BuildFeaturesPage()
     }
     battery->AddRow(tr("Low means"), meta.low_battery_threshold.Description(), threshold);
     BindValues(threshold, &Fields::low_battery_threshold, kLowBatteryLevels, _refreshers);
+
+    auto *fullCharge = new Widget::Toggle;
+    battery->AddRow(
+        tr("Full charge notification"), meta.full_charge_notification.Description(), fullCharge);
+    BindToggle(fullCharge, &Fields::full_charge_notification, _refreshers);
 
     auto *quick = new Widget::SettingsGroup{tr("Quick connect"), column};
 
@@ -572,6 +1047,45 @@ QWidget *SettingsWindow::BuildAboutPage()
     linksLayout->addWidget(logs);
     identity->AddWidget(links);
 
+    _checkUpdatesButton = MakeButton(tr("Check now"), column);
+    const QString updateDesc =
+        Utils::File::IsPortableMode()
+            ? tr("Running in portable mode (v%1). Updates open the release page.")
+                  .arg(CONFIG_VERSION_STRING)
+            : tr("Current version v%1.").arg(CONFIG_VERSION_STRING);
+    _updateCheckRow = identity->AddRow(tr("Updates"), updateDesc, _checkUpdatesButton);
+    connect(_checkUpdatesButton, &QPushButton::clicked, this, [this] {
+        _checkUpdatesButton->setEnabled(false);
+        _updateCheckRow->SetDescription(tr("Checking GitHub Releases..."));
+        emit ManualUpdateCheckRequested();
+    });
+
+    auto *diagnostics = new Widget::SettingsGroup{tr("Diagnostics"), column};
+    _copyDiagButton = MakeButton(tr("Copy report"), column);
+    _diagTransportRow = diagnostics->AddRow(
+        tr("Transport & AAP driver"), tr("BLE Broadcast (AAP L2CAP driver not installed)."),
+        _copyDiagButton);
+    auto *diagSpacer = new QWidget{column};
+    diagSpacer->setFixedSize(1, 1);
+    _diagConnectionRow = diagnostics->AddRow(tr("Connection & audio"), tr("Idle."), diagSpacer);
+
+    connect(_copyDiagButton, &QPushButton::clicked, this, [this] {
+        RefreshDiagnostics();
+        QString report;
+        if (_diagnosticsProvider) {
+            report = _diagnosticsProvider().clipboardReport;
+        }
+        if (report.isEmpty()) {
+            report = QStringLiteral("AirpodsBridge v%1").arg(CONFIG_VERSION_STRING);
+        }
+        if (auto *cb = QGuiApplication::clipboard(); cb != nullptr) {
+            cb->setText(report);
+        }
+        _copyDiagButton->setText(tr("Copied"));
+        QTimer::singleShot(
+            1500, _copyDiagButton, [btn = _copyDiagButton] { btn->setText(tr("Copy report")); });
+    });
+
     auto *thirdParty = new Widget::SettingsGroup{tr("Third-party components"), column};
 
     auto *creditsLabel = MakeLabel({}, Theme::Font::Body(), Widget::Label::Role::Primary, column);
@@ -584,6 +1098,7 @@ QWidget *SettingsWindow::BuildAboutPage()
     thirdParty->AddWidget(creditsLabel);
 
     column->layout()->addWidget(identity);
+    column->layout()->addWidget(diagnostics);
     column->layout()->addWidget(thirdParty);
     return column;
 }
@@ -630,20 +1145,416 @@ void SettingsWindow::Refresh()
     }
     _rangeValue->setText(RangeText(-fields.rssi_min));
 
+    {
+        const QSignalBlocker blocker{_volumeCapSlider};
+        _volumeCapSlider->setValue(std::clamp<int>(
+            static_cast<int>(fields.volume_cap_level), kVolumeCapMin, kVolumeCapMax));
+    }
+    _volumeCapValue->setText(QStringLiteral("%1%").arg(_volumeCapSlider->value()));
+    _volumeCapSliderRow->setEnabled(fields.volume_cap_enabled);
+
     _earDetectionResumeRow->setEnabled(fields.automatic_ear_detection);
     _earDetectionSingleBudRow->setEnabled(fields.automatic_ear_detection);
 
     RefreshBinding(fields);
+    RefreshPreferredMicrophones(fields);
     RefreshQuickConnectDevices(fields);
+    RefreshRadioControl();
+    RefreshLatencyDiagnostics();
+    RefreshDiagnostics();
+}
+
+void SettingsWindow::SetAudioEndpointsProvider(AudioEndpointsProvider provider)
+{
+    _audioEndpointsProvider = std::move(provider);
+    RefreshPreferredMicrophones(GetCurrent());
+}
+
+void SettingsWindow::SetDiagnosticsProvider(DiagnosticsProvider provider)
+{
+    _diagnosticsProvider = std::move(provider);
+    RefreshDiagnostics();
+}
+
+void SettingsWindow::SetLatencyDiagnosticsProvider(LatencyDiagnosticsProvider provider)
+{
+    _latencyDiagnosticsProvider = std::move(provider);
+    RefreshLatencyDiagnostics();
+}
+
+void SettingsWindow::SetRadioControlProvider(RadioControlProvider provider)
+{
+    _radioControlProvider = std::move(provider);
+    RefreshRadioControl();
+}
+
+void SettingsWindow::SetRadioSetupBusy(bool busy, const QString &statusText)
+{
+    if (_radioPrimaryButton == nullptr || _radioStatusRow == nullptr) {
+        return;
+    }
+    _radioPrimaryButton->setEnabled(!busy);
+    if (_radioRestoreButton != nullptr) {
+        _radioRestoreButton->setEnabled(!busy);
+    }
+    if (busy) {
+        _radioPrimaryButton->setText(tr("Working..."));
+        if (_radioProgressContainer != nullptr && _radioProgressBar != nullptr) {
+            _radioProgressBar->SetProgress(5);
+            _radioProgressContainer->show();
+        }
+        if (!statusText.isEmpty()) {
+            _radioStatusRow->SetDescription(statusText);
+        }
+    }
+    else {
+        if (_radioProgressContainer != nullptr) {
+            _radioProgressContainer->hide();
+        }
+        RefreshRadioControl();
+        if (!statusText.isEmpty()) {
+            _radioStatusRow->SetDescription(statusText);
+        }
+    }
+}
+
+void SettingsWindow::SetRadioSetupProgress(int percent, const QString &statusText)
+{
+    if (_radioProgressContainer != nullptr && _radioProgressBar != nullptr) {
+        _radioProgressContainer->show();
+        _radioProgressBar->SetProgress(percent);
+    }
+    if (_radioStatusRow != nullptr && !statusText.isEmpty()) {
+        _radioStatusRow->SetDescription(statusText);
+    }
+}
+
+void SettingsWindow::RefreshRadioControl()
+{
+    if (_radioStatusRow == nullptr) {
+        return;
+    }
+    _radioPrimaryButton->setEnabled(true);
+
+    RadioControlInfo info;
+    if (_radioControlProvider) {
+        info = _radioControlProvider();
+    }
+
+    if (!info.engineDetail.isEmpty()) {
+        _radioStatusRow->SetDescription(info.engineDetail);
+    }
+    if (!info.adapterSummary.isEmpty()) {
+        _radioAdapterRow->SetDescription(info.adapterSummary);
+    }
+
+    if (info.guardTripped) {
+        _radioPrimaryAction = RadioServiceAction::RetryGuard;
+        _radioPrimaryButton->setText(tr("Retry engine"));
+        _radioPrimaryButton->SetPrimary(true);
+    }
+    else if (info.serviceInstalled) {
+        _radioPrimaryAction = RadioServiceAction::Uninstall;
+        _radioPrimaryButton->setText(tr("Disable"));
+        _radioPrimaryButton->SetPrimary(false);
+    }
+    else {
+        _radioPrimaryAction = RadioServiceAction::InstallOrEnable;
+        _radioPrimaryButton->setText(tr("Enable"));
+        _radioPrimaryButton->SetPrimary(true);
+    }
+    _radioRestoreButton->setEnabled(info.serviceInstalled || info.serviceRunning);
+
+    const bool live = info.aapConnected && info.state.has_value();
+    const auto caps =
+        Core::AirPods::CapabilitiesFor(live ? info.state->model : Core::AirPods::Model::Unknown);
+
+    _aapNoiseModeContainer->setEnabled(live && caps.SupportsNoiseControl());
+    _aapNoiseControl->setEnabled(live && caps.SupportsNoiseControl());
+    _aapConvAwarenessRow->setEnabled(live && caps.supportsConversationalAwareness);
+    _aapAdaptiveRow->setEnabled(live && caps.supportsAdaptiveAudio);
+    _aapOneBudAncRow->setEnabled(live && caps.supportsNoiseCancellation);
+    _aapPersonalizedVolRow->setEnabled(live && caps.supportsAdaptiveAudio);
+    _aapLoudSoundRow->setEnabled(live && caps.supportsAdaptiveAudio);
+    _aapAllowOffRow->setEnabled(live && caps.supportsAllowOffMode);
+    _aapHeartRateRow->setEnabled(live && caps.supportsHeartRate);
+    _aapHeartRateCard->setEnabled(live && caps.supportsHeartRate);
+    _aapMicSideRow->setEnabled(live && !caps.isOnePiece);
+    _aapPressSpeedRow->setEnabled(live && !caps.isOnePiece);
+    _aapPressHoldRow->setEnabled(live && !caps.isOnePiece);
+    _aapToneVolumeRow->setEnabled(live);
+    _aapHeadGesturesRow->setEnabled(live && caps.supportsAdaptiveAudio);
+    _aapHearingAidRow->setEnabled(live && caps.supportsHearingAid);
+    _aapMediaAssistRow->setEnabled(live && caps.supportsHearingAid);
+
+    if (live) {
+        const auto &nc = info.state->noiseControl;
+        {
+            const QSignalBlocker b{_aapNoiseControl};
+            NoiseControlPresentation pres;
+            pres.visible = true;
+            pres.activeMode = nc.activeMode.value_or(Core::AirPods::NoiseControlMode::Off);
+            pres.supportsAdaptive = caps.supportsAdaptiveAudio;
+            pres.adaptiveNoiseLevel = nc.adaptiveNoiseLevel.value_or(50);
+            pres.allowOffListeningMode = nc.allowOffListeningMode.value_or(false);
+            _aapNoiseControl->ApplyPresentation(pres);
+        }
+        {
+            const QSignalBlocker b{_aapConvAwareness};
+            _aapConvAwareness->setChecked(nc.conversationalAwareness.value_or(false));
+        }
+        {
+            const QSignalBlocker b{_aapAdaptiveSlider};
+            const int lvl = static_cast<int>(nc.adaptiveNoiseLevel.value_or(50));
+            _aapAdaptiveSlider->setValue(lvl);
+            _aapAdaptiveValue->setText(QStringLiteral("%1%").arg(lvl));
+        }
+        {
+            const QSignalBlocker b{_aapOneBudAnc};
+            _aapOneBudAnc->setChecked(nc.oneBudAnc.value_or(false));
+        }
+        {
+            const QSignalBlocker b{_aapPersonalizedVol};
+            _aapPersonalizedVol->setChecked(nc.personalizedVolume.value_or(false));
+        }
+        {
+            const QSignalBlocker b{_aapLoudSound};
+            _aapLoudSound->setChecked(nc.loudSoundReduction.value_or(false));
+        }
+        {
+            const QSignalBlocker b{_aapAllowOff};
+            _aapAllowOff->setChecked(nc.allowOffListeningMode.value_or(false));
+        }
+        {
+            const QSignalBlocker b{_aapHeartRate};
+            _aapHeartRate->setChecked(nc.heartRateMonitoringEnabled.value_or(false));
+        }
+        const QString modelDisplay = info.state->displayName.isEmpty()
+                                         ? Helper::ToString(info.state->model)
+                                         : info.state->displayName;
+        _aapHeartRateCard->SetTelemetry(Widget::HeartRateCard::Telemetry{
+            .supported = caps.supportsHeartRate,
+            .sensorEnabled = nc.heartRateMonitoringEnabled.value_or(false),
+            .connected = true,
+            .deviceName = modelDisplay,
+            .status = nc.heartRateStatus,
+            .bpm = nc.heartRateBpm,
+            .confidence = nc.heartRateConfidence,
+            .minBpm = nc.heartRateMinBpm,
+            .maxBpm = nc.heartRateMaxBpm,
+            .avgBpm = nc.heartRateAvgBpm,
+            .history = nc.heartRateHistory,
+        });
+        if (_aapHeartRateTelemetryRow != nullptr) {
+            if (!caps.supportsHeartRate) {
+                _aapHeartRateTelemetryRow->SetDescription(
+                    tr("%1 does not include an optical heart rate sensor. Requires AirPods Pro 3 "
+                       "or Powerbeats Pro 2.")
+                        .arg(modelDisplay));
+            }
+            else if (info.heartRateServiceId.has_value()) {
+                _aapHeartRateTelemetryRow->SetDescription(
+                    tr("%1 %2 RTBuddy Service %3 %4 Optical PPG 1 Hz")
+                        .arg(modelDisplay)
+                        .arg(QChar{0x00B7})
+                        .arg(info.heartRateServiceId.value())
+                        .arg(QChar{0x00B7}));
+            }
+            else {
+                _aapHeartRateTelemetryRow->SetDescription(
+                    tr("%1 %2 AAP L2CAP connected (discovering RTBuddy optical PPG sensor)")
+                        .arg(modelDisplay)
+                        .arg(QChar{0x00B7}));
+            }
+        }
+        {
+            const QSignalBlocker b{_aapMicSide};
+            _aapMicSide->SetCurrentIndex(
+                static_cast<int>(nc.microphoneSide.value_or(Core::AirPods::MicrophoneSide::Auto)));
+        }
+        {
+            const QSignalBlocker b{_aapPressSpeed};
+            _aapPressSpeed->SetCurrentIndex(
+                static_cast<int>(nc.pressSpeed.value_or(Core::AirPods::PressSpeed::Default)));
+        }
+        {
+            const QSignalBlocker b{_aapPressHold};
+            _aapPressHold->SetCurrentIndex(static_cast<int>(
+                nc.pressHoldDuration.value_or(Core::AirPods::PressHoldDuration::Default)));
+        }
+        {
+            const QSignalBlocker b{_aapToneVolumeSlider};
+            const int vol = std::clamp<int>(static_cast<int>(nc.toneVolume.value_or(100)), 15, 100);
+            _aapToneVolumeSlider->setValue(vol);
+            _aapToneVolumeValue->setText(QStringLiteral("%1%").arg(vol));
+        }
+        {
+            const QSignalBlocker b{_aapHeadGestures};
+            _aapHeadGestures->setChecked(nc.headGestures.value_or(false));
+        }
+        {
+            const QSignalBlocker b{_aapHearingAid};
+            _aapHearingAid->setChecked(nc.hearingAidEnabled.value_or(false));
+        }
+        {
+            const QSignalBlocker b{_aapMediaAssist};
+            _aapMediaAssist->setChecked(nc.mediaAssistEnabled.value_or(false));
+        }
+    }
+    else {
+        NoiseControlPresentation idlePres;
+        idlePres.visible = true;
+        idlePres.activeMode = Core::AirPods::NoiseControlMode::NoiseCancellation;
+        idlePres.supportsAdaptive = true;
+        idlePres.adaptiveNoiseLevel = 50;
+        _aapNoiseControl->ApplyPresentation(idlePres);
+        _aapHeartRateCard->SetTelemetry(Widget::HeartRateCard::Telemetry{
+            .supported = false,
+            .sensorEnabled = false,
+            .connected = false,
+        });
+        if (_aapHeartRateTelemetryRow != nullptr) {
+            _aapHeartRateTelemetryRow->SetDescription(
+                tr("Connect AirPods Pro 3 or Powerbeats Pro 2 with the Radio Proxy Service "
+                   "active."));
+        }
+    }
+}
+
+void SettingsWindow::RefreshAudioDevices()
+{
+    RefreshPreferredMicrophones(GetCurrent());
+}
+
+void SettingsWindow::RefreshLatencyDiagnostics()
+{
+    if (_latencyProfileRow == nullptr || _latencyModeButton == nullptr) {
+        return;
+    }
+    if (!_latencyDiagnosticsProvider) {
+        _latencyModeButton->setEnabled(true);
+        return;
+    }
+
+    const auto diag = _latencyDiagnosticsProvider();
+    QStringList parts;
+    if (diag.aacEnabled) {
+        parts << tr("AAC (~220-280 ms)");
+    }
+    else if (!diag.enhancementsEnabled && diag.enginePeriodMs > 0.0 && diag.enginePeriodMs <= 5.0) {
+        parts << tr("SBC ultra-low latency (~80-115 ms)");
+    }
+    else {
+        parts << tr("SBC low-latency (~110-140 ms)");
+    }
+    parts << (diag.enhancementsEnabled ? tr("Enhancements on") : tr("Enhancements off"));
+    if (diag.enginePeriodMs > 0.0) {
+        parts << tr("%1 ms engine").arg(diag.enginePeriodMs, 0, 'f', 1);
+    }
+    if (diag.keepAliveActive) {
+        parts << tr("Stream awake");
+    }
+
+    _latencyProfileRow->SetDescription(parts.join(QStringLiteral(" \u00B7 ")));
+    _latencyTargetLowLatency = !diag.IsLowLatencyProfile();
+    if (diag.applyingProfile) {
+        _latencyModeButton->setEnabled(false);
+        _latencyModeButton->setText(tr("Applying..."));
+    }
+    else {
+        _latencyModeButton->setEnabled(true);
+        _latencyModeButton->setText(
+            _latencyTargetLowLatency ? tr("Gaming mode (SBC)") : tr("Music mode (AAC)"));
+    }
+}
+
+void SettingsWindow::RefreshDiagnostics()
+{
+    if (!_diagnosticsProvider || _diagTransportRow == nullptr || _diagConnectionRow == nullptr) {
+        return;
+    }
+    const auto info = _diagnosticsProvider();
+    if (!info.transportSummary.isEmpty()) {
+        _diagTransportRow->SetDescription(info.transportSummary);
+    }
+    if (!info.connectionSummary.isEmpty()) {
+        _diagConnectionRow->SetDescription(info.connectionSummary);
+    }
+}
+
+void SettingsWindow::RefreshPreferredMicrophones(const Fields &fields)
+{
+    if (_preferredMic == nullptr) {
+        return;
+    }
+    const QSignalBlocker blocker{_preferredMic};
+    _preferredMic->clear();
+    _preferredMic->addItem(tr("Windows default (off)"), QString{});
+
+    if (_audioEndpointsProvider) {
+        for (const auto &ep : _audioEndpointsProvider()) {
+            if (ep.isBluetoothHfp) {
+                continue;
+            }
+            _preferredMic->addItem(ep.name, ep.id);
+        }
+    }
+
+    const QString &selected = fields.preferred_mic_device_id;
+    int idx = _preferredMic->findData(selected);
+    if (idx < 0 && !selected.isEmpty()) {
+        _preferredMic->addItem(tr("Saved microphone (not available)"), selected);
+        idx = _preferredMic->count() - 1;
+    }
+    _preferredMic->setCurrentIndex(idx >= 0 ? idx : 0);
+}
+
+void SettingsWindow::SetUpdateCheckFeedback(
+    Core::Update::CheckStatus status, const QString &version)
+{
+    if (_checkUpdatesButton != nullptr) {
+        _checkUpdatesButton->setEnabled(true);
+    }
+    if (_updateCheckRow == nullptr) {
+        return;
+    }
+
+    switch (status) {
+    case Core::Update::CheckStatus::UpToDate:
+        _updateCheckRow->SetDescription(tr("You are up to date (v%1).").arg(CONFIG_VERSION_STRING));
+        break;
+    case Core::Update::CheckStatus::UpdateAvailable:
+        _updateCheckRow->SetDescription(
+            version.isEmpty() ? tr("A newer version is available.")
+                              : tr("Version v%1 is available.").arg(version));
+        break;
+    case Core::Update::CheckStatus::Failed:
+        _updateCheckRow->SetDescription(tr("Could not reach GitHub Releases. Try again later."));
+        break;
+    }
+}
+
+void SettingsWindow::RefreshBindingState()
+{
+    RefreshBinding(GetCurrent());
 }
 
 void SettingsWindow::RefreshBinding(const Fields &fields)
 {
     const bool bound = fields.device_address != 0;
-    _bindingRow->SetDescription(
-        bound ? tr("Battery and ear state follow this device. Unbind it to choose another.")
-              : tr("No device is bound. Open the popup from the tray icon and choose "
-                   "“Bind to AirPods”."));
+    const QString name = fields.bound_device_name.trimmed();
+    if (bound) {
+        _bindingRow->SetDescription(
+            name.isEmpty()
+                ? tr("Battery and ear state follow this device. Unbind it to choose another.")
+                : tr("%1 %2 battery and ear state follow this device.")
+                      .arg(name, QStringLiteral("\u2014")));
+    }
+    else {
+        _bindingRow->SetDescription(
+            tr("No device is bound. Click Bind to choose your paired AirPods."));
+    }
+    _bindButton->setText(bound ? tr("Change") : tr("Bind"));
     _unbind->setEnabled(bound);
 }
 
@@ -687,6 +1598,7 @@ void SettingsWindow::RestoreDefaults()
     const auto current = GetCurrent();
     auto defaults = GetDefault();
     defaults.device_address = current.device_address;
+    defaults.bound_device_name = current.bound_device_name;
     defaults.tray_quick_connect_device_id = current.tray_quick_connect_device_id;
     Save(std::move(defaults));
 
@@ -701,13 +1613,19 @@ void SettingsWindow::UpdateAdvOverride()
     std::vector<std::vector<uint8_t>> advs;
     for (const auto &line : lines) {
         std::vector<uint8_t> bytes;
+        bool lineValid = true;
         for (const auto &byteText : line.split(' ', QString::SkipEmptyParts)) {
             bool success{false};
             const auto byte = byteText.toUInt(&success, 16);
-            APB_ASSERT(success);
+            if (!success || byte > 0xFF) {
+                lineValid = false;
+                break;
+            }
             bytes.emplace_back(static_cast<uint8_t>(byte));
         }
-        advs.emplace_back(std::move(bytes));
+        if (lineValid && !bytes.empty()) {
+            advs.emplace_back(std::move(bytes));
+        }
     }
 
     Core::Debug::DebugConfig::GetInstance().UpdateAdvOverride(

@@ -4,10 +4,11 @@
 #include "Source/Gui/TaskbarStatus.h"
 #include "Source/Gui/TaskbarGeometry.h"
 
-#include <QWindow>
 #include <QApplication>
 #include <QDesktopWidget>
+#include <QWindow>
 
+#include "Source/Core/SystemTheme.h"
 #include "Source/Support/OS/Windows.h"
 
 //
@@ -138,29 +139,78 @@ TaskbarStatus::TaskbarStatus(QWidget *parent) : QDialog{parent}
     setWindowFlags(
         windowFlags() | Qt::Tool /* | Qt::FramelessWindowHint*/ | Qt::WindowStaysOnTopHint);
 
-    SetPaletteColor(_ui.labelLeft, QPalette::WindowText, Qt::white);
-    SetPaletteColor(_ui.labelRight, QPalette::WindowText, Qt::white);
-
     layout()->setContentsMargins(5, 5, 5, 5);
 
     _icon.left->SetText("L");
     _icon.right->SetText("R");
-    _battery.left->setBatterySize(25, 10);
     _battery.left->setShowText(false);
-    _battery.left->setChargingIconColor(Qt::white);
-    _battery.right->setBatterySize(25, 10);
+    _battery.left->setBatterySize(15, 15);
     _battery.right->setShowText(false);
-    _battery.right->setChargingIconColor(Qt::white);
+    _battery.right->setBatterySize(15, 15);
 
     _ui.horizontalLayoutLeft->insertWidget(0, _icon.left);
     _ui.horizontalLayoutLeft->addWidget(_battery.left);
     _ui.horizontalLayoutRight->insertWidget(0, _icon.right);
     _ui.horizontalLayoutRight->addWidget(_battery.right);
+
+    _taskbarDark = Core::SystemTheme::IsTaskbarDark();
+    ApplyTaskbarTheme();
 }
 
 TaskbarStatus::~TaskbarStatus()
 {
     _isStateReady = false;
+    UpdateVisible();
+}
+
+void TaskbarStatus::SetTaskbarDark(bool dark)
+{
+    if (_taskbarDark == dark) {
+        return;
+    }
+    _taskbarDark = dark;
+    ApplyTaskbarTheme();
+}
+
+void TaskbarStatus::ApplyTaskbarTheme()
+{
+    using Utils::Qt::SetPaletteColor;
+
+    // Follow Windows' taskbar theme (`SystemUsesLightTheme`) so text and icons stay readable
+    // on both light and dark taskbars, independent of the app's own light/dark mode.
+    const QColor fg = _taskbarDark ? QColor{245, 245, 247} : QColor{28, 28, 30};
+    const QColor badgeFg = _taskbarDark ? QColor{28, 28, 30} : QColor{245, 245, 247};
+    const QColor track = _taskbarDark ? QColor{90, 90, 96} : QColor{195, 195, 200};
+
+    SetPaletteColor(_ui.labelLeft, QPalette::WindowText, fg);
+    SetPaletteColor(_ui.labelRight, QPalette::WindowText, fg);
+
+    for (auto *icon : {_icon.left, _icon.right}) {
+        icon->SetBgColor(fg);
+        icon->SetFgColor(badgeFg);
+    }
+
+    for (auto *battery : {_battery.left, _battery.right}) {
+        battery->setBorderColor(track);
+        battery->setChargingIconColor(fg);
+    }
+
+    update();
+}
+
+void TaskbarStatus::OnTaskbarCreated()
+{
+    // Explorer restarted and replaced the taskbar HWND: drop the stale foreign parent and
+    // re-attach if the widget should currently be visible.
+    if (_isActuallyEnabled) {
+        hide();
+        _updateTimer.stop();
+        if (windowHandle() != nullptr) {
+            windowHandle()->setParent(nullptr);
+        }
+        _rebarWindow.reset();
+        _isActuallyEnabled = false;
+    }
     UpdateVisible();
 }
 
@@ -204,7 +254,8 @@ bool TaskbarStatus::Enable()
     const auto &info = optInfo.value();
 
     winId(); // makes `windowHandle()` have a value
-    windowHandle()->setParent(QWindow::fromWinId((WId)info.hReBarWindow32));
+    _rebarWindow.reset(QWindow::fromWinId(reinterpret_cast<WId>(info.hReBarWindow32)));
+    windowHandle()->setParent(_rebarWindow.get());
     setAttribute(Qt::WA_TranslucentBackground);
     UpdatePos(info, true);
     _isFirstTimeout = true;
@@ -216,15 +267,18 @@ bool TaskbarStatus::Enable()
 bool TaskbarStatus::Disable()
 {
     const auto optInfo = GetTaskBarInfo();
-    if (!optInfo.has_value()) {
-        LOG(Error, "Try to disable, but failed to `GetTaskBarInfo()`");
-        return false;
-    }
-    const auto &info = optInfo.value();
-
     hide();
     _updateTimer.stop();
-    UpdatePos(info, false);
+    if (windowHandle() != nullptr) {
+        windowHandle()->setParent(nullptr);
+    }
+    _rebarWindow.reset();
+
+    if (!optInfo.has_value()) {
+        LOG(Error, "Try to disable, but failed to `GetTaskBarInfo()`");
+        return true;
+    }
+    UpdatePos(optInfo.value(), false);
     return true;
 }
 

@@ -3,8 +3,9 @@
 
 #include "Source/Support/Error.h"
 
-#include <format>
 #include <cstdlib>
+#include <filesystem>
+#include <format>
 #include <fstream>
 
 #include <QDesktopServices>
@@ -25,7 +26,10 @@ void WriteStackTraceFile()
     using namespace boost;
 
     auto workspace = Utils::File::GetWorkspace();
-    std::ofstream file{workspace.absoluteFilePath(kStackTraceFileName).toStdString()};
+    // Use `std::filesystem::path` from UTF-16 so non-ASCII Windows usernames open cleanly.
+    const std::filesystem::path path{
+        workspace.absoluteFilePath(kStackTraceFileName).toStdWString()};
+    std::ofstream file{path};
 
     file << stacktrace::stacktrace();
 }

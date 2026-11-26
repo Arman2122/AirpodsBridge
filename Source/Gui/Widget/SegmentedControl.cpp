@@ -39,6 +39,19 @@ void SegmentedControl::AddSegment(const QString &text)
     update();
 }
 
+void SegmentedControl::Clear()
+{
+    _segments.clear();
+    _currentIndex = -1;
+    updateGeometry();
+    update();
+}
+
+int SegmentedControl::SegmentCount() const
+{
+    return _segments.size();
+}
+
 int SegmentedControl::CurrentIndex() const
 {
     return _currentIndex;
@@ -52,6 +65,13 @@ void SegmentedControl::SetCurrentIndex(int index)
     _currentIndex = index;
     update();
     Q_EMIT CurrentIndexChanged(index);
+}
+
+void SegmentedControl::SetSegmentPadding(int padding)
+{
+    _segmentPadding = qMax(4, padding);
+    updateGeometry();
+    update();
 }
 
 QFont SegmentedControl::SelectedFont() const
@@ -70,7 +90,7 @@ QSize SegmentedControl::sizeHint() const
         widest = qMax(widest, metrics.horizontalAdvance(segment));
     }
 
-    const int segmentWidth = widest + kSegmentPadding * 2;
+    const int segmentWidth = widest + _segmentPadding * 2;
     const int width = segmentWidth * _segments.size() + static_cast<int>(kTrackInset * 2);
     return {width, Theme::Metric::SegmentHeight};
 }

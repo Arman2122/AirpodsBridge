@@ -4,29 +4,73 @@
 #include "Source/Core/Update.h"
 
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <optional>
 
 #include <QCryptographicHash>
-#include <QFile>
-#include <QRegularExpression>
-#include <QUrl>
-#include <QProcess>
-#include <QTemporaryDir>
 #include <QDesktopServices>
+#include <QFile>
+#include <QFileInfo>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QTemporaryDir>
+#include <QUrl>
 
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
 #include <Config.h>
+#include "Source/Core/Settings.h"
 #include "Source/Support/Assert.h"
 #include "Source/Support/Logger.h"
-#include "Source/Core/Settings.h"
+#include "Source/Support/Utils.h"
 
 using json = nlohmann::json;
 
 namespace Core::Update {
 
-// TODO: Write a test for this function
+namespace {
+
+constexpr int32_t kHttpTimeoutMs = 15'000;
+constexpr int32_t kConnectTimeoutMs = 10'000;
+
+std::string UserAgentHeader()
+{
+    return std::string{Config::ProgramName} + "/" + Config::Version::String + " (" +
+           Config::UrlRepository + ")";
+}
+
+cpr::Header DefaultApiHeaders(const std::string &etag = {})
+{
+    cpr::Header headers{
+        {"Accept", "application/vnd.github.v3+json"},
+        {"User-Agent", UserAgentHeader()},
+    };
+    if (!etag.empty()) {
+        headers.emplace("If-None-Match", etag);
+    }
+    return headers;
+}
+
+// Per-session HTTP metadata cache so periodic checks neither re-query the current
+// version's prerelease flag nor consume GitHub rate-limit quota on unchanged releases.
+struct HttpCache {
+    std::mutex mutex;
+    std::optional<bool> isCurrentPreRelease;
+    std::string latestEtag;
+    std::optional<ReleaseInfo> latestCachedRelease;
+};
+
+HttpCache &Cache()
+{
+    static HttpCache instance;
+    return instance;
+}
+
+} // namespace
+
 QVersionNumber ToVersionNumber(QString str)
 {
     // If "v1.2.3", set to "1.2.3"
@@ -95,6 +139,17 @@ QString ParseSha256Digest(const json &asset)
 
 } // namespace
 
+QString SanitizeAssetFileName(const QString &fileName)
+{
+    QString normalized = fileName;
+    normalized.replace('\\', '/');
+    const QString base = QFileInfo{normalized}.fileName().trimmed();
+    if (base.isEmpty() || base == "." || base == ".." || base.contains('/')) {
+        return {};
+    }
+    return base;
+}
+
 std::optional<ReleaseInfo> ParseSingleReleaseResponse(const std::string &text)
 {
     try {
@@ -119,7 +174,7 @@ std::optional<ReleaseInfo> ParseSingleReleaseResponse(const std::string &text)
         else {
             changeLog = ParseChangeLog(body);
             if (changeLog.isEmpty()) {
-                LOG(Warn, "ParseSRResponse: Find change log block failed. body: {}", body);
+                LOG(Trace, "ParseSRResponse: release notes have no structured changelog section.");
             }
         }
 
@@ -131,8 +186,8 @@ std::optional<ReleaseInfo> ParseSingleReleaseResponse(const std::string &text)
         info.isPreRelease = root["prerelease"].get<bool>();
 
         for (const auto &asset : root["assets"]) {
-
-            auto fileName = QString::fromStdString(asset["name"].get<std::string>());
+            auto fileName =
+                SanitizeAssetFileName(QString::fromStdString(asset["name"].get<std::string>()));
             auto fileSize = asset["size"].get<size_t>();
             auto downloadUrl = asset["browser_download_url"].get<std::string>();
             auto sha256 = ParseSha256Digest(asset);
@@ -235,23 +290,6 @@ bool VerifyFileSha256(const QString &filePath, const QString &expectedSha256)
     return actualSha256.compare(expectedSha256, Qt::CaseInsensitive) == 0;
 }
 
-std::optional<ReleaseInfo> FetchLatestStableRelease()
-{
-    const cpr::Response response = cpr::Get(
-        cpr::Url{std::string{Config::ApiRepository} + "/releases/latest"},
-        cpr::Header{{"Accept", "application/vnd.github.v3+json"}});
-
-    if (response.status_code != 200) {
-        LOG(Warn,
-            "FetchLatestRelease: GitHub REST API response status code isn't 200. "
-            "code: {} text: '{}'",
-            response.status_code, response.text);
-        return std::nullopt;
-    }
-
-    return Details::ParseSingleReleaseResponse(response.text);
-}
-
 std::optional<ReleaseInfo> FetchReleaseByVersion(const QVersionNumber &version)
 {
     // Repositories differ on whether release tags carry a `v` prefix, and one repository can
@@ -262,7 +300,8 @@ std::optional<ReleaseInfo> FetchReleaseByVersion(const QVersionNumber &version)
     for (const auto &tag : tags) {
         const cpr::Response response = cpr::Get(
             cpr::Url{std::string{Config::ApiRepository} + "/releases/tags/" + tag},
-            cpr::Header{{"Accept", "application/vnd.github.v3+json"}});
+            DefaultApiHeaders(), cpr::ConnectTimeout{kConnectTimeoutMs},
+            cpr::Timeout{kHttpTimeoutMs});
 
         if (response.status_code == 200) {
             return Details::ParseSingleReleaseResponse(response.text);
@@ -278,35 +317,67 @@ std::optional<ReleaseInfo> FetchReleaseByVersion(const QVersionNumber &version)
 
 std::optional<ReleaseInfo> FetchLatestRelease(bool includePreRelease)
 {
-    if (includePreRelease) {
+    const std::string endpoint =
+        std::string{Config::ApiRepository} + (includePreRelease ? "/releases" : "/releases/latest");
 
-        const cpr::Response response = cpr::Get(
-            cpr::Url{std::string{Config::ApiRepository} + "/releases"},
-            cpr::Header{{"Accept", "application/vnd.github.v3+json"}});
+    std::string etag;
+    {
+        std::lock_guard<std::mutex> lock{Cache().mutex};
+        etag = Cache().latestEtag;
+    }
 
-        if (response.status_code != 200) {
-            LOG(Warn,
-                "FetchRecentReleases: GitHub REST API response status code isn't 200. "
-                "code: {} text: '{}'",
-                response.status_code, response.text);
-            return {};
+    const cpr::Response response = cpr::Get(
+        cpr::Url{endpoint}, DefaultApiHeaders(etag), cpr::ConnectTimeout{kConnectTimeoutMs},
+        cpr::Timeout{kHttpTimeoutMs});
+
+    if (response.status_code == 304) {
+        std::lock_guard<std::mutex> lock{Cache().mutex};
+        if (Cache().latestCachedRelease.has_value()) {
+            LOG(Info, "FetchLatestRelease: 304 Not Modified; reusing cached release.");
+            return Cache().latestCachedRelease;
         }
-        return Details::ParseMultipleReleasesResponseFirst(response.text);
     }
-    else {
-        return FetchLatestStableRelease();
+
+    if (response.status_code != 200) {
+        LOG(Warn,
+            "FetchLatestRelease: GitHub REST API response status code isn't 200. "
+            "code: {} error: '{}'",
+            response.status_code, response.error.message);
+        return std::nullopt;
     }
+
+    auto parsed = includePreRelease ? Details::ParseMultipleReleasesResponseFirst(response.text)
+                                    : Details::ParseSingleReleaseResponse(response.text);
+    if (parsed.has_value()) {
+        std::lock_guard<std::mutex> lock{Cache().mutex};
+        if (const auto it = response.header.find("ETag"); it != response.header.end()) {
+            Cache().latestEtag = it->second;
+        }
+        else if (const auto itLower = response.header.find("etag");
+                 itLower != response.header.end())
+        {
+            Cache().latestEtag = itLower->second;
+        }
+        Cache().latestCachedRelease = parsed;
+    }
+    return parsed;
 }
 
 bool IsCurrentPreRelease()
 {
-    const auto optInfo = Details::FetchReleaseByVersion(GetLocalVersion());
-    if (!optInfo.has_value()) {
-        LOG(Warn, "IsCurrentPreRelease: FetchReleaseByVersion() failed.");
-        return false;
+    {
+        std::lock_guard<std::mutex> lock{Cache().mutex};
+        if (Cache().isCurrentPreRelease.has_value()) {
+            return Cache().isCurrentPreRelease.value();
+        }
     }
 
-    const auto result = optInfo->isPreRelease;
+    const auto optInfo = Details::FetchReleaseByVersion(GetLocalVersion());
+    const bool result = optInfo.has_value() ? optInfo->isPreRelease : false;
+    {
+        std::lock_guard<std::mutex> lock{Cache().mutex};
+        Cache().isCurrentPreRelease = result;
+    }
 
     LOG(Info, "IsCurrentPreRelease: returns {}.", result);
     return result;
@@ -323,6 +394,11 @@ bool NeedToUpdate(const ReleaseInfo &info)
 
 bool ReleaseInfo::CanAutoUpdate() const
 {
+    // Portable installations should update via the portable ZIP on the release page rather
+    // than launching the per-user NSIS installer into %LOCALAPPDATA%\Programs.
+    if (Utils::File::IsPortableMode()) {
+        return false;
+    }
     return !fileName.isEmpty() && !downloadUrl.empty() && fileSize != 0 && sha256.size() == 64;
 }
 
@@ -340,7 +416,7 @@ QVersionNumber GetLocalVersion()
 
 //////////////////////////////////////////////////
 
-std::optional<ReleaseInfo> FetchUpdateRelease()
+CheckResult CheckForUpdate(bool ignoreSkippedVersion)
 {
     const auto isCurrentPreRelease = Details::IsCurrentPreRelease();
     LOG(Info, "Update: isCurrentPreRelease: '{}'", isCurrentPreRelease);
@@ -348,7 +424,7 @@ std::optional<ReleaseInfo> FetchUpdateRelease()
     const auto optInfo = Details::FetchLatestRelease(isCurrentPreRelease);
     if (!optInfo.has_value()) {
         LOG(Warn, "Update: FetchLatestRelease() returned nullopt.");
-        return std::nullopt;
+        return {CheckStatus::Failed, std::nullopt};
     }
 
     const auto &latestInfo = optInfo.value();
@@ -357,16 +433,28 @@ std::optional<ReleaseInfo> FetchUpdateRelease()
     LOG(Info, "Update: Latest version: '{}'", latestInfo.version.toString());
     if (!needToUpdate) {
         LOG(Info, "Update: No need to update.");
-        return std::nullopt;
+        return {CheckStatus::UpToDate, latestInfo};
     }
 
     LOG(Info, "Update: Need to update.");
 
-    if (latestInfo.version.toString() == Core::Settings::GetCurrent().skipped_version) {
+    if (!ignoreSkippedVersion &&
+        latestInfo.version.toString() == Core::Settings::GetCurrent().skipped_version)
+    {
         LOG(Info, "Update: User skipped this new version. Ignore.");
-        return std::nullopt;
+        return {CheckStatus::UpToDate, latestInfo};
     }
-    return optInfo;
+
+    return {CheckStatus::UpdateAvailable, optInfo};
+}
+
+std::optional<ReleaseInfo> FetchUpdateRelease()
+{
+    auto result = CheckForUpdate(false);
+    if (result.status == CheckStatus::UpdateAvailable) {
+        return std::move(result.release);
+    }
+    return std::nullopt;
 }
 
 //////////////////////////////////////////////////
@@ -380,6 +468,12 @@ bool DownloadInstall(const ReleaseInfo &info, const FnProgress &progressCallback
         return false;
     }
 
+    const QString safeFileName = Details::SanitizeAssetFileName(info.fileName);
+    if (safeFileName.isEmpty()) {
+        LOG(Warn, "DownloadInstall: Unsafe asset filename rejected.");
+        return false;
+    }
+
     QTemporaryDir tempPath;
     if (!tempPath.isValid()) {
         auto errorString = tempPath.errorString();
@@ -387,18 +481,26 @@ bool DownloadInstall(const ReleaseInfo &info, const FnProgress &progressCallback
         return false;
     }
 
-    const QString filePath = QFileInfo{tempPath.filePath(info.fileName)}.absoluteFilePath();
+    const QString filePath = QFileInfo{tempPath.filePath(safeFileName)}.absoluteFilePath();
 
     LOG(Info, "DownloadInstall: Ready to download to '{}'.", filePath);
 
-    // Begin download
+    // Construct from UTF-16 `std::filesystem::path` so non-ASCII Windows usernames work.
+    std::ofstream outFile{std::filesystem::path{filePath.toStdWString()}, std::ios::binary};
+    if (!outFile.is_open()) {
+        LOG(Warn, "DownloadInstall: Unable to open destination file '{}'.", filePath);
+        return false;
+    }
 
-    std::ofstream outFile{filePath.toStdString(), std::ios::binary};
     auto response = cpr::Download(
-        outFile, cpr::Url{info.downloadUrl},
+        outFile, cpr::Url{info.downloadUrl}, cpr::Header{{"User-Agent", UserAgentHeader()}},
+        cpr::ConnectTimeout{kConnectTimeoutMs},
         cpr::ProgressCallback{[&](cpr::cpr_off_t downloadTotal, cpr::cpr_off_t downloadNow,
                                   cpr::cpr_off_t uploadTotal, cpr::cpr_off_t uploadNow,
                                   intptr_t userdata) {
+            Q_UNUSED(uploadTotal);
+            Q_UNUSED(uploadNow);
+            Q_UNUSED(userdata);
             LOG(Trace, "Downloaded {} / {} bytes.", downloadNow, downloadTotal);
             return progressCallback(downloadNow, downloadTotal);
         }});
@@ -425,8 +527,6 @@ bool DownloadInstall(const ReleaseInfo &info, const FnProgress &progressCallback
 
     tempPath.setAutoRemove(false);
 
-    // Download succeeded
-    //
     LOG(Info, "Download: Downloaded succeeded. filePath: '{}', size: {}", filePath,
         response.downloaded_bytes);
 
@@ -445,6 +545,10 @@ AsyncChecker::AsyncChecker(FnCallback callback) : _callback{std::move(callback)}
 AsyncChecker::~AsyncChecker()
 {
     Stop();
+    _manualThread.request_stop();
+    if (_manualThread.joinable()) {
+        _manualThread.join();
+    }
 }
 
 void AsyncChecker::Start()
@@ -457,6 +561,26 @@ void AsyncChecker::Start()
 void AsyncChecker::Stop()
 {
     _timer.Stop();
+}
+
+void AsyncChecker::CheckNow(FnManualCallback onFinished)
+{
+    if (_manualRunning.exchange(true)) {
+        return;
+    }
+
+    if (_manualThread.joinable()) {
+        _manualThread.join();
+    }
+
+    _manualThread =
+        std::jthread{[this, onFinished = std::move(onFinished)](std::stop_token stopToken) {
+            const auto result = CheckForUpdate(true);
+            _manualRunning = false;
+            if (!stopToken.stop_requested() && onFinished) {
+                onFinished(result);
+            }
+        }};
 }
 
 void AsyncChecker::Checker()

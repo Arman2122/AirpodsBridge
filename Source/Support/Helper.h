@@ -195,10 +195,19 @@ public:
     template <class... Args>
     inline void Invoke(Args &&...args) const
     {
-        std::lock_guard<std::mutex> lock{_mutex};
+        // Copy out before running user code so a callback can safely register or unregister
+        // without deadlocking on `_mutex`.
+        std::vector<Function> snapshot;
+        {
+            std::lock_guard<std::mutex> lock{_mutex};
+            snapshot.reserve(_callbacks.size());
+            for (const auto &callbackInfo : _callbacks) {
+                snapshot.push_back(callbackInfo.second);
+            }
+        }
 
-        for (const auto &callbackInfo : _callbacks) {
-            callbackInfo.second(args...);
+        for (const auto &callback : snapshot) {
+            callback(args...);
         }
     }
 

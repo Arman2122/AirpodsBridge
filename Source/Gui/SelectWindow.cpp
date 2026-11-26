@@ -25,15 +25,22 @@ SelectWindow::SelectWindow(const QString &title, const QStringList &items, QWidg
 
     _ui.label->setText(title);
     _ui.listWidget->addItems(items);
-    _ui.listWidget->item(0)->setSelected(true);
+    // `setCurrentRow(0)` sets both the visual selection and `currentRow()`, so confirming
+    // the pre-selected first entry without re-clicking it returns index 0 rather than -1.
+    _ui.listWidget->setCurrentRow(0);
+
+    connect(_ui.listWidget, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) {
+        _clickedButton = QDialogButtonBox::Yes;
+        accept();
+    });
 }
 
 bool SelectWindow::HasResult() const
 {
-    return _clickedButton == QDialogButtonBox::Yes;
+    return _clickedButton == QDialogButtonBox::Yes && GetSelectedIndex() >= 0;
 }
 
-int SelectWindow::GetSeletedIndex() const
+int SelectWindow::GetSelectedIndex() const
 {
     return _ui.listWidget->currentRow();
 }

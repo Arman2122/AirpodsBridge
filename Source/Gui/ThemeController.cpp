@@ -17,10 +17,12 @@
 namespace Gui {
 
 ThemeController::ThemeController(QObject *parent)
-    : QObject{parent}, _system{[this](bool dark) {
-          _systemDark = dark;
-          Apply();
-      }}
+    : QObject{parent}, _system{
+                           [this](bool dark) {
+                               _systemDark = dark;
+                               Apply();
+                           },
+                           [this](bool taskbarDark) { Q_EMIT TaskbarModeChanged(taskbarDark); }}
 {
     _systemDark = _system.IsDark();
 
@@ -43,6 +45,11 @@ void ThemeController::SetAppearance(Core::Settings::Appearance appearance)
 Theme::Mode ThemeController::Mode() const
 {
     return _applied.value_or(Theme::Mode::Light);
+}
+
+bool ThemeController::IsTaskbarDark() const
+{
+    return _system.IsTaskbarDark();
 }
 
 Theme::Mode ThemeController::Resolve(Core::Settings::Appearance appearance, bool systemDark)

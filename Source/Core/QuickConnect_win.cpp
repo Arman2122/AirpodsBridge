@@ -28,6 +28,7 @@ struct EndpointInfo {
     QString id;
     QString containerId;
     DWORD state{};
+    bool isRender{false};
 };
 
 class ScopedComApartment final
@@ -199,57 +200,63 @@ std::vector<EndpointInfo> EnumerateAudioEndpoints(std::stop_token stopToken)
         return endpoints;
     }
 
-    Support::OS::Windows::Com::UniquePtr<IMMDeviceCollection> collection;
-    HRESULT result = enumerator->EnumAudioEndpoints(
-        eAll, DEVICE_STATEMASK_ALL, collection.ReleaseAndAddressOf());
-    if (FAILED(result)) {
-        LOG(Warn, "EnumAudioEndpoints failed. HRESULT: {:#x}", result);
-        return endpoints;
-    }
-
-    UINT count{};
-    result = collection->GetCount(&count);
-    if (FAILED(result)) {
-        LOG(Warn, "IMMDeviceCollection::GetCount failed. HRESULT: {:#x}", result);
-        return endpoints;
-    }
-
-    endpoints.reserve(count);
-    for (UINT i = 0; i < count; ++i) {
-        if (stopToken.stop_requested()) {
-            break;
+    const auto collectFlow = [&](EDataFlow flow) {
+        Support::OS::Windows::Com::UniquePtr<IMMDeviceCollection> collection;
+        HRESULT result = enumerator->EnumAudioEndpoints(
+            flow, DEVICE_STATEMASK_ALL, collection.ReleaseAndAddressOf());
+        if (FAILED(result) || !collection) {
+            LOG(Warn, "EnumAudioEndpoints failed. HRESULT: {:#x}", result);
+            return;
         }
 
-        Support::OS::Windows::Com::UniquePtr<IMMDevice> endpoint;
-        result = collection->Item(i, endpoint.ReleaseAndAddressOf());
+        UINT count{};
+        result = collection->GetCount(&count);
         if (FAILED(result)) {
-            LOG(Warn, "IMMDeviceCollection::Item failed. HRESULT: {:#x}", result);
-            continue;
+            LOG(Warn, "IMMDeviceCollection::GetCount failed. HRESULT: {:#x}", result);
+            return;
         }
 
-        LPWSTR rawEndpointId{};
-        result = endpoint->GetId(&rawEndpointId);
-        if (FAILED(result)) {
-            LOG(Warn, "IMMDevice::GetId failed. HRESULT: {:#x}", result);
-            continue;
-        }
-        const QString endpointId = QString::fromWCharArray(rawEndpointId);
-        CoTaskMemFree(rawEndpointId);
+        endpoints.reserve(endpoints.size() + count);
+        for (UINT i = 0; i < count; ++i) {
+            if (stopToken.stop_requested()) {
+                break;
+            }
 
-        auto containerId = GetEndpointContainerId(*endpoint.operator->());
-        if (!containerId.has_value()) {
-            continue;
-        }
+            Support::OS::Windows::Com::UniquePtr<IMMDevice> endpoint;
+            result = collection->Item(i, endpoint.ReleaseAndAddressOf());
+            if (FAILED(result)) {
+                LOG(Warn, "IMMDeviceCollection::Item failed. HRESULT: {:#x}", result);
+                continue;
+            }
 
-        DWORD state{};
-        result = endpoint->GetState(&state);
-        if (FAILED(result)) {
-            LOG(Warn, "IMMDevice::GetState failed. HRESULT: {:#x}", result);
-            continue;
-        }
+            LPWSTR rawEndpointId{};
+            result = endpoint->GetId(&rawEndpointId);
+            if (FAILED(result)) {
+                LOG(Warn, "IMMDevice::GetId failed. HRESULT: {:#x}", result);
+                continue;
+            }
+            const QString endpointId = QString::fromWCharArray(rawEndpointId);
+            CoTaskMemFree(rawEndpointId);
 
-        endpoints.push_back({endpointId, containerId.value(), state});
-    }
+            auto containerId = GetEndpointContainerId(*endpoint.operator->());
+            if (!containerId.has_value()) {
+                continue;
+            }
+
+            DWORD state{};
+            result = endpoint->GetState(&state);
+            if (FAILED(result)) {
+                LOG(Warn, "IMMDevice::GetState failed. HRESULT: {:#x}", result);
+                continue;
+            }
+
+            endpoints.push_back({endpointId, containerId.value(), state, flow == eRender});
+        }
+    };
+
+    // Enumerate Render (A2DP Stereo) endpoints first so QuickConnect targets playback first.
+    collectFlow(eRender);
+    collectFlow(eCapture);
 
     return endpoints;
 }
@@ -309,7 +316,8 @@ std::map<QString, Device> EnumeratePairedBluetoothDevices(std::stop_token stopTo
     return devices;
 }
 
-HRESULT RequestEndpointReconnect(const QString &endpointId, std::stop_token stopToken)
+HRESULT
+SendEndpointBtAudioProperty(const QString &endpointId, ULONG propertyId, std::stop_token stopToken)
 {
     ScopedComApartment apartment;
 
@@ -326,7 +334,7 @@ HRESULT RequestEndpointReconnect(const QString &endpointId, std::stop_token stop
     const auto endpointIdW = endpointId.toStdWString();
     HRESULT result = enumerator->GetDevice(endpointIdW.c_str(), endpoint.ReleaseAndAddressOf());
     if (FAILED(result)) {
-        LOG(Warn, "Get endpoint for reconnect failed. HRESULT: {:#x}", result);
+        LOG(Warn, "Get endpoint for BtAudio property failed. HRESULT: {:#x}", result);
         return result;
     }
     if (stopToken.stop_requested()) {
@@ -360,8 +368,16 @@ HRESULT RequestEndpointReconnect(const QString &endpointId, std::stop_token stop
     Support::OS::Windows::Com::UniquePtr<IConnector> connectedConnector;
     result = connector->GetConnectedTo(connectedConnector.ReleaseAndAddressOf());
     if (FAILED(result)) {
-        LOG(Warn, "IConnector::GetConnectedTo failed. Endpoint: {}, HRESULT: {:#x}",
-            MaskDeviceId(endpointId), result);
+        // Unplugged/HFP secondary endpoints routinely return ERROR_PATH_NOT_FOUND (0x80070003)
+        // when offline; keep routine misses at Trace level instead of spamming warnings.
+        if (result == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)) {
+            LOG(Trace, "IConnector::GetConnectedTo skipped offline endpoint: {}",
+                MaskDeviceId(endpointId));
+        }
+        else {
+            LOG(Warn, "IConnector::GetConnectedTo failed. Endpoint: {}, HRESULT: {:#x}",
+                MaskDeviceId(endpointId), result);
+        }
         return result;
     }
     if (stopToken.stop_requested()) {
@@ -426,14 +442,14 @@ HRESULT RequestEndpointReconnect(const QString &endpointId, std::stop_token stop
 
     KSPROPERTY property{
         KSPROPSETID_BtAudio,
-        KSPROPERTY_ONESHOT_RECONNECT,
+        propertyId,
         KSPROPERTY_TYPE_GET,
     };
     ULONG returned{};
     result = ksControl->KsProperty(
         reinterpret_cast<PKSPROPERTY>(&property), sizeof(property), nullptr, 0, &returned);
     if (FAILED(result)) {
-        LOG(Warn, "BtAudio reconnect request failed. Endpoint: {}, HRESULT: {:#x}",
+        LOG(Warn, "BtAudio property ({}) failed. Endpoint: {}, HRESULT: {:#x}", propertyId,
             MaskDeviceId(endpointId), result);
     }
     return result;
@@ -476,12 +492,36 @@ void WindowsBackend::StopObserving()
     _observation.store({});
 }
 
+void WindowsBackend::InvalidateCache()
+{
+    std::lock_guard<std::mutex> lock{_pairedCacheMutex};
+    _pairedCache.clear();
+    _pairedCacheUpdated = {};
+}
+
 std::vector<Device> WindowsBackend::ListDevices(std::stop_token stopToken)
 {
-    auto pairedDevices = EnumeratePairedBluetoothDevices(stopToken);
-    if (stopToken.stop_requested()) {
-        return {};
+    // Reuse recent paired-device enumeration (WinRT DeviceInformation::FindAllAsync takes
+    // 300-1000 ms) while always querying fresh WASAPI endpoint states (<5 ms), so Connect
+    // responds instantaneously.
+    std::map<QString, Device> pairedDevices;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock{_pairedCacheMutex};
+        if (!_pairedCache.empty() && (now - _pairedCacheUpdated) < std::chrono::seconds{30}) {
+            pairedDevices = _pairedCache;
+        }
     }
+    if (pairedDevices.empty()) {
+        pairedDevices = EnumeratePairedBluetoothDevices(stopToken);
+        if (stopToken.stop_requested()) {
+            return {};
+        }
+        std::lock_guard<std::mutex> lock{_pairedCacheMutex};
+        _pairedCache = pairedDevices;
+        _pairedCacheUpdated = now;
+    }
+
     const auto endpoints = EnumerateAudioEndpoints(stopToken);
 
     std::set<QString> endpointContainerKeys;
@@ -513,6 +553,17 @@ std::vector<Device> WindowsBackend::ListDevices(std::stop_token stopToken)
 
 bool WindowsBackend::RequestReconnect(const QString &id, std::stop_token stopToken)
 {
+    return SendContainerProperty(id, KSPROPERTY_ONESHOT_RECONNECT, stopToken);
+}
+
+bool WindowsBackend::RequestDisconnect(const QString &id, std::stop_token stopToken)
+{
+    return SendContainerProperty(id, KSPROPERTY_ONESHOT_DISCONNECT, stopToken);
+}
+
+bool WindowsBackend::SendContainerProperty(
+    const QString &id, ULONG propertyId, std::stop_token stopToken)
+{
     if (stopToken.stop_requested()) {
         return false;
     }
@@ -537,19 +588,34 @@ bool WindowsBackend::RequestReconnect(const QString &id, std::stop_token stopTok
     _observation.store(std::const_pointer_cast<const Observation>(observation));
 
     bool accepted = false;
-    for (const auto &endpointId : observation->endpointIds) {
+    bool renderAccepted = false;
+    for (const auto &endpoint : endpoints) {
         if (stopToken.stop_requested()) {
             break;
         }
+        if (NormalizeContainerId(endpoint.containerId) != selectedContainerKey) {
+            continue;
+        }
+        // Poke ALL Render endpoints (both A2DP Stereo and HFP Render) so Windows brings up
+        // stereo playback reliably; only fall through to Capture endpoints if no Render endpoint
+        // accepted the request.
+        if (!endpoint.isRender && renderAccepted) {
+            break;
+        }
 
-        const HRESULT result = RequestEndpointReconnect(endpointId, stopToken);
-        accepted = accepted || result == S_OK;
+        const HRESULT result = SendEndpointBtAudioProperty(endpoint.id, propertyId, stopToken);
+        if (result == S_OK) {
+            accepted = true;
+            if (endpoint.isRender) {
+                renderAccepted = true;
+            }
+        }
     }
 
     if (!accepted) {
         StopObserving();
         if (!stopToken.stop_requested()) {
-            LOG(Warn, "No endpoint accepted BtAudio reconnect request. Container: {}",
+            LOG(Warn, "No endpoint accepted BtAudio request ({}). Container: {}", propertyId,
                 MaskDeviceId(id));
         }
     }
@@ -604,12 +670,16 @@ HRESULT WindowsBackend::OnDeviceStateChanged(LPCWSTR deviceId, DWORD newState)
 HRESULT WindowsBackend::OnDeviceAdded(LPCWSTR deviceId)
 {
     Q_UNUSED(deviceId)
+    std::lock_guard<std::mutex> lock{_pairedCacheMutex};
+    _pairedCacheUpdated = {};
     return S_OK;
 }
 
 HRESULT WindowsBackend::OnDeviceRemoved(LPCWSTR deviceId)
 {
     Q_UNUSED(deviceId)
+    std::lock_guard<std::mutex> lock{_pairedCacheMutex};
+    _pairedCacheUpdated = {};
     return S_OK;
 }
 

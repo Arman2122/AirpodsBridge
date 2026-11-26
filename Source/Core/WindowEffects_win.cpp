@@ -35,6 +35,12 @@ constexpr DWORD kCornerPreferenceRound = 2;   // DWMWCP_ROUND
 constexpr DWORD kUseImmersiveDarkMode = 20;
 constexpr DWORD kUseImmersiveDarkModeBefore20H1 = 19;
 
+// DWMWA_SYSTEMBACKDROP_TYPE (Windows 11 22H2 / build 22621+).
+constexpr DWORD kSystemBackdropType = 38;
+constexpr DWORD kBackdropNone = 1;    // DWMSBT_NONE
+constexpr DWORD kBackdropMica = 2;    // DWMSBT_MAINWINDOW
+constexpr DWORD kBackdropAcrylic = 3; // DWMSBT_TRANSIENTWINDOW
+
 } // namespace
 
 bool ApplyRoundedCorners(QWindow *window)
@@ -90,6 +96,43 @@ bool ApplyDarkTitleBar(QWindow *window, bool dark)
 
     LOG(Info, "WindowEffects: the compositor does not take dark title bars here.");
     return false;
+}
+
+bool ApplyBackdrop(QWindow *window, BackdropStyle style)
+{
+    if (window == nullptr || window->handle() == nullptr) {
+        return false;
+    }
+
+    const auto handle = reinterpret_cast<HWND>(window->winId());
+    if (handle == nullptr) {
+        return false;
+    }
+
+    DWORD value = kBackdropNone;
+    switch (style) {
+    case BackdropStyle::Mica:
+        value = kBackdropMica;
+        break;
+    case BackdropStyle::Acrylic:
+        value = kBackdropAcrylic;
+        break;
+    case BackdropStyle::None:
+    default:
+        value = kBackdropNone;
+        break;
+    }
+
+    const HRESULT hr = DwmSetWindowAttribute(handle, kSystemBackdropType, &value, sizeof(value));
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    if (style != BackdropStyle::None) {
+        MARGINS margins{-1, -1, -1, -1};
+        DwmExtendFrameIntoClientArea(handle, &margins);
+    }
+    return true;
 }
 
 bool AreAnimationsEnabled()

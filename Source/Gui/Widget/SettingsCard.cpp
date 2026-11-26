@@ -17,7 +17,7 @@ namespace Gui::Widget {
 SettingsRow::SettingsRow(
     const QString &title, const QString &description, QWidget *control, QWidget *parent)
     : QWidget{parent}, _title{new Label{title, Label::Role::Primary, this}},
-      _description{new Label{description, Label::Role::Secondary, this}}
+      _description{new Label{description, Label::Role::Secondary, this}}, _control{control}
 {
     setMinimumHeight(Theme::Metric::RowMinHeight);
 
@@ -42,6 +42,12 @@ SettingsRow::SettingsRow(
 
     if (control != nullptr) {
         control->setParent(this);
+        if (control->accessibleName().isEmpty()) {
+            control->setAccessibleName(title);
+        }
+        if (control->accessibleDescription().isEmpty() && !description.isEmpty()) {
+            control->setAccessibleDescription(description);
+        }
         layout->addWidget(control, 0, Qt::AlignRight | Qt::AlignVCenter);
     }
 }
@@ -49,12 +55,18 @@ SettingsRow::SettingsRow(
 void SettingsRow::SetTitle(const QString &title)
 {
     _title->setText(title);
+    if (_control != nullptr) {
+        _control->setAccessibleName(title);
+    }
 }
 
 void SettingsRow::SetDescription(const QString &description)
 {
     _description->setText(description);
     _description->setVisible(!description.isEmpty());
+    if (_control != nullptr) {
+        _control->setAccessibleDescription(description);
+    }
 }
 
 //////////////////////////////////////////////////

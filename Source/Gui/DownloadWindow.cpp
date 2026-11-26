@@ -3,14 +3,13 @@
 
 #include "Source/Gui/DownloadWindow.h"
 
-#include <QPushButton>
-#include <QMetaObject>
+#include <algorithm>
+
 #include <QMessageBox>
+#include <QPushButton>
 
 #include <Config.h>
 #include "Source/Gui/Utils.h"
-
-using namespace std::chrono_literals;
 
 namespace Gui {
 
@@ -19,14 +18,18 @@ DownloadWindow::DownloadWindow(Core::Update::ReleaseInfo info, QWidget *parent)
 {
     _ui.setupUi(this);
 
-    setWindowFlags(windowFlags() & ~Qt::WindowCloseButtonHint);
+    // 0..1000 permille scale avoids integer overflow on large assets and keeps the bar smooth.
+    _ui.progressBar->setRange(0, 1000);
+    _ui.progressBar->setValue(0);
 
     connect(_ui.pushButtonDownloadManually, &QPushButton::clicked, this, [this]() {
+        _downloadThread.request_stop();
         _info.OpenUrl();
-        Utils::Qt::QuitApplicationSafely();
+        reject();
     });
 
     connect(this, &DownloadWindow::UpdateProgressSafely, this, &DownloadWindow::UpdateProgress);
+    connect(this, &DownloadWindow::OnSucceededSafely, this, &DownloadWindow::OnSucceeded);
     connect(this, &DownloadWindow::OnFailedSafely, this, &DownloadWindow::OnFailed);
 
     _downloadThread =
@@ -41,38 +44,44 @@ DownloadWindow::~DownloadWindow()
     }
 }
 
-void DownloadWindow::UpdateProgress(int downloaded, int total)
+void DownloadWindow::UpdateProgress(int progressPermille)
 {
-    if (total == 0) {
-        return;
-    }
-    _ui.progressBar->setValue(downloaded);
-    _ui.progressBar->setMaximum(total);
+    _ui.progressBar->setValue(std::clamp(progressPermille, 0, 1000));
+}
+
+void DownloadWindow::OnSucceeded()
+{
+    // The installer has already launched detached; caller quits gracefully on Accepted.
+    accept();
 }
 
 void DownloadWindow::OnFailed()
 {
-    LOG(Warn, "DownloadInstall failed. Popup latest url and quit.");
+    LOG(Warn, "DownloadInstall failed. Offering manual release page.");
 
     QMessageBox::warning(
         this, Config::ProgramName,
         tr("Oops, an error occurred during the automatic update.\n"
-           "Please download and install the new version manually."));
+           "Opening the release page so you can download it manually."));
 
     _info.OpenUrl();
-    Utils::Qt::QuitApplicationSafely();
+    reject();
 }
 
 void DownloadWindow::DownloadThread(std::stop_token stopToken)
 {
-    bool successful =
+    const bool successful =
         Core::Update::DownloadInstall(_info, [this, stopToken](size_t downloaded, size_t total) {
             if (stopToken.stop_requested()) {
                 LOG(Info, "Download cancelled because the window is closing.");
                 return false;
             }
 
-            UpdateProgressSafely(downloaded, total);
+            if (total > 0) {
+                const auto permille = static_cast<int>(
+                    std::min<uint64_t>(1000, (static_cast<uint64_t>(downloaded) * 1000) / total));
+                emit UpdateProgressSafely(permille);
+            }
             return true;
         });
 
@@ -81,10 +90,10 @@ void DownloadWindow::DownloadThread(std::stop_token stopToken)
     }
 
     if (successful) {
-        Utils::Qt::QuitApplicationSafely();
+        emit OnSucceededSafely();
     }
     else {
-        OnFailedSafely();
+        emit OnFailedSafely();
     }
 }
 } // namespace Gui

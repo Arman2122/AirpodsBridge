@@ -9,12 +9,7 @@
 namespace Core::SystemTheme {
 
 //
-// Whether Windows is set to dark mode for applications.
-//
-// That is the "Choose your default app mode" switch under Settings > Personalisation >
-// Colours. The taskbar and Start have a switch of their own, which this does not read:
-// the application's windows are apps, and follow the app setting the way every other
-// application does.
+// Whether Windows is set to dark mode for applications (`AppsUseLightTheme`).
 //
 // Reads the registry each time; it is a handful of microseconds, and never called from a
 // hot path.
@@ -22,7 +17,14 @@ namespace Core::SystemTheme {
 bool IsDark();
 
 //
-// Reports when that setting changes, on the GUI thread.
+// Whether Windows' shell surfaces -- the taskbar and notification area -- are dark
+// (`SystemUsesLightTheme`). Users on Windows 10/11 can pair a dark taskbar with light apps
+// or vice versa, so taskbar-hosted widgets follow this rather than `IsDark()`.
+//
+bool IsTaskbarDark();
+
+//
+// Reports when Windows' app or taskbar mode changes, on the GUI thread.
 //
 // Windows announces the change by broadcasting a message to every top-level window rather
 // than through any callback, so the watcher keeps a hidden window of its own to receive it
@@ -34,7 +36,7 @@ class Watcher
 public:
     using Callback = std::function<void(bool dark)>;
 
-    explicit Watcher(Callback onChanged);
+    explicit Watcher(Callback onAppsChanged, Callback onTaskbarChanged = {});
     ~Watcher();
 
     Watcher(const Watcher &) = delete;
@@ -42,6 +44,7 @@ public:
 
     // What was last read: the state at construction, or the last change reported.
     bool IsDark() const;
+    bool IsTaskbarDark() const;
 
 private:
     class Impl;

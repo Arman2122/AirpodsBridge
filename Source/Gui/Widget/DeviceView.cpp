@@ -22,7 +22,9 @@ constexpr int kCatchUpBudget = 6;
 DeviceView::DeviceView(QWidget *parent) : QWidget{parent}
 {
     setAttribute(Qt::WA_TranslucentBackground);
+#if defined APB_DEBUG
     setCursor(Qt::PointingHandCursor);
+#endif
 }
 
 DeviceView::~DeviceView()

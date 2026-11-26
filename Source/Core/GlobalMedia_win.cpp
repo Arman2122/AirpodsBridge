@@ -279,41 +279,29 @@ Q_DECLARE_OPERATORS_FOR_FLAGS(MediaProgramThroughVirtualKeyAbstract::WindowMatch
 class UniversalSystemSession final : public MediaProgramAbstract
 {
 public:
-    UniversalSystemSession() = default;
+    explicit UniversalSystemSession(GlobalSystemMediaTransportControlsSession session)
+        : _session{std::move(session)}
+    {
+    }
 
     bool IsAvailable() override
     {
-        try {
-            _currentSession = GetCurrentSession();
-        }
-        catch (const Support::OS::Windows::Winrt::Exception &ex) {
-            LOG(Warn, "UniversalSystemSession get current session failed. Code: {:#x}, Message: {}",
-                ex.code(), winrt::to_string(ex.message()));
-            return false;
-        }
-
-        if (!_currentSession.value()) {
-            _currentSession.reset();
-            LOG(Trace, "UniversalSystemSession current session is unavailable.");
-            return false;
-        }
-
-        return true;
+        return static_cast<bool>(_session);
     }
 
     bool IsPlaying() const override
     {
-        return IsPlaying(_currentSession.value());
+        return IsPlaying(_session);
     }
 
     bool Play() override
     {
         try {
-            _currentSession->TryPlayAsync().get();
+            _session.TryPlayAsync().get();
             return true;
         }
         catch (const Support::OS::Windows::Winrt::Exception &ex) {
-            LOG(Warn, "_currentSession->TryPlayAsync() failed. {}", Helper::ToString(ex));
+            LOG(Warn, "_session.TryPlayAsync() failed. {}", Helper::ToString(ex));
             return false;
         }
     }
@@ -321,18 +309,54 @@ public:
     bool Pause() override
     {
         try {
-            _currentSession->TryPauseAsync().get();
+            _session.TryPauseAsync().get();
             return true;
         }
         catch (const Support::OS::Windows::Winrt::Exception &ex) {
-            LOG(Warn, "_currentSession->TryPauseAsync() failed. {}", Helper::ToString(ex));
+            LOG(Warn, "_session.TryPauseAsync() failed. {}", Helper::ToString(ex));
             return false;
         }
     }
 
     std::wstring GetProgramName() const override
     {
+        try {
+            const auto appId = _session.SourceAppUserModelId();
+            if (!appId.empty()) {
+                return L"UniversalSystemSession(" + std::wstring{appId.c_str()} + L")";
+            }
+        }
+        catch (const Support::OS::Windows::Winrt::Exception &) {
+        }
         return L"UniversalSystemSession";
+    }
+
+    static std::vector<std::unique_ptr<MediaProgramAbstract>> EnumerateSessions()
+    {
+        std::vector<std::unique_ptr<MediaProgramAbstract>> result;
+        try {
+            const auto manager =
+                GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+            const auto sessions = manager.GetSessions();
+            result.reserve(sessions.Size());
+            for (uint32_t i = 0; i < sessions.Size(); ++i) {
+                if (auto session = sessions.GetAt(i); session) {
+                    result.emplace_back(
+                        std::make_unique<UniversalSystemSession>(std::move(session)));
+                }
+            }
+            if (result.empty()) {
+                if (auto current = manager.GetCurrentSession(); current) {
+                    result.emplace_back(
+                        std::make_unique<UniversalSystemSession>(std::move(current)));
+                }
+            }
+        }
+        catch (const Support::OS::Windows::Winrt::Exception &ex) {
+            LOG(Warn, "UniversalSystemSession enumerate sessions failed. Code: {:#x}, Message: {}",
+                ex.code(), winrt::to_string(ex.message()));
+        }
+        return result;
     }
 
 protected:
@@ -342,29 +366,7 @@ protected:
     }
 
 private:
-    std::optional<GlobalSystemMediaTransportControlsSession> _currentSession;
-
-    static GlobalSystemMediaTransportControlsSession GetCurrentSession()
-    {
-        return GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
-            .get()
-            .GetCurrentSession();
-    }
-
-    static auto GetSessions()
-    {
-        auto sessions =
-            GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get().GetSessions();
-
-        std::vector<GlobalSystemMediaTransportControlsSession> result;
-        result.reserve(sessions.Size());
-
-        for (size_t i = 0; i < sessions.Size(); ++i) {
-            result.emplace_back(sessions.GetAt(i));
-        }
-
-        return result;
-    }
+    GlobalSystemMediaTransportControlsSession _session;
 
     static bool IsPlaying(const GlobalSystemMediaTransportControlsSession &gsmtcs)
     {
@@ -463,7 +465,7 @@ protected:
 
 auto GetAvailablePrograms()
 {
-    std::vector<std::unique_ptr<MediaProgramAbstract>> result;
+    auto result = UniversalSystemSession::EnumerateSessions();
 
 #define PUSH_IF_AVAILABLE(type)                                                                    \
     {                                                                                              \
@@ -473,7 +475,6 @@ auto GetAvailablePrograms()
         }                                                                                          \
     }
 
-    PUSH_IF_AVAILABLE(UniversalSystemSession);
     PUSH_IF_AVAILABLE(QQMusic);
     PUSH_IF_AVAILABLE(NeteaseMusic);
     PUSH_IF_AVAILABLE(KuGouMusic);
@@ -494,12 +495,101 @@ auto GetAvailablePrograms()
 }
 } // namespace Details
 
+Controller::~Controller()
+{
+    Shutdown();
+}
+
+void Controller::EnsureWorkerStartedLocked()
+{
+    if (_shuttingDown || _worker.joinable()) {
+        return;
+    }
+    _worker = std::jthread{[this](std::stop_token stopToken) { WorkerLoop(stopToken); }};
+}
+
+void Controller::Shutdown()
+{
+    {
+        std::lock_guard<std::mutex> lock{_queueMutex};
+        _shuttingDown = true;
+        _pendingActions.clear();
+    }
+    _worker.request_stop();
+    _queueCv.notify_all();
+    if (_worker.joinable()) {
+        _worker.join();
+    }
+}
+
 void Controller::Play()
 {
-    std::lock_guard<std::mutex> lock{_mutex};
+    std::lock_guard<std::mutex> lock{_queueMutex};
+    if (_shuttingDown) {
+        return;
+    }
+    EnsureWorkerStartedLocked();
+    _pendingActions.push_back(Details::ActionId::Play);
+    _queueCv.notify_one();
+}
 
+void Controller::Pause()
+{
+    std::lock_guard<std::mutex> lock{_queueMutex};
+    if (_shuttingDown) {
+        return;
+    }
+    EnsureWorkerStartedLocked();
+    _pendingActions.push_back(Details::ActionId::Pause);
+    _queueCv.notify_one();
+}
+
+void Controller::WorkerLoop(std::stop_token stopToken)
+{
+    // WinRT SMTC async calls and COM audio meters must run on an MTA thread rather than
+    // blocking Qt's STA GUI thread.
+    Support::OS::Windows::Winrt::Initialize();
+
+    while (true) {
+        Details::ActionId action;
+        {
+            std::unique_lock<std::mutex> lock{_queueMutex};
+            _queueCv.wait(lock, [&] {
+                return stopToken.stop_requested() || _shuttingDown || !_pendingActions.empty();
+            });
+            if (stopToken.stop_requested() || _shuttingDown) {
+                break;
+            }
+            action = _pendingActions.front();
+            _pendingActions.pop_front();
+        }
+
+        if (action == Details::ActionId::Pause) {
+            ExecutePause();
+        }
+        else {
+            ExecutePlay();
+        }
+    }
+
+    // Release WinRT/COM proxies on the MTA thread that acquired them before exiting.
+    _pausedPrograms.clear();
+    _pausedAt.reset();
+}
+
+void Controller::ExecutePlay()
+{
     if (_pausedPrograms.empty()) {
         LOG(Trace, L"Paused programs vector is empty.");
+        return;
+    }
+
+    const bool expired = _pausedAt.has_value() && Clock::now() - _pausedAt.value() > kResumeExpiry;
+    if (expired) {
+        LOG(Info, "Skipping stale auto-resume: media was paused longer than {} minutes ago.",
+            kResumeExpiry.count());
+        _pausedPrograms.clear();
+        _pausedAt.reset();
         return;
     }
 
@@ -513,14 +603,14 @@ void Controller::Play()
     }
 
     _pausedPrograms.clear();
+    _pausedAt.reset();
 }
 
-void Controller::Pause()
+void Controller::ExecutePause()
 {
-    std::lock_guard<std::mutex> lock{_mutex};
-
     auto programs = Details::GetAvailablePrograms();
 
+    std::vector<std::unique_ptr<Details::MediaProgramAbstract>> newlyPaused;
     for (auto &&program : programs) {
         if (program->IsPlaying()) {
             if (!program->Pause()) {
@@ -528,9 +618,16 @@ void Controller::Pause()
             }
             else {
                 LOG(Trace, L"Media paused. Program name: {}", program->GetProgramName());
-                _pausedPrograms.emplace_back(std::move(program));
+                newlyPaused.emplace_back(std::move(program));
             }
         }
+    }
+
+    // Replace rather than append so disabling "Resume playback" never leaks sessions
+    // across repeated pauses.
+    if (!newlyPaused.empty()) {
+        _pausedPrograms = std::move(newlyPaused);
+        _pausedAt = Clock::now();
     }
 }
 } // namespace Core::GlobalMedia
