@@ -49,10 +49,10 @@ public:
     // Invokes `usbip.exe` (installed by usbip-win2) to attach/detach an exported device on
     // 127.0.0.1:<port>. Returns the assigned usbip port number on attach, or std::nullopt.
     std::optional<int> AttachLocalDevice(const std::string &busId);
-    static bool DetachLocalPort(int usbipPort);
+    static bool DetachLocalPort(int usbipPort, DWORD timeoutMs = 6000);
     // Detaches every localhost usbip-win2 port currently bound to `/<busId>` so stale ports from
     // earlier sessions or crashes can never duplicate the virtual Bluetooth adapter.
-    static uint32_t DetachAllPortsForBusId(const std::string &busId);
+    static uint32_t DetachAllPortsForBusId(const std::string &busId, DWORD timeoutMs = 6000);
 
     // Blocking exact socket I/O helpers shared by bridge sessions.
     static bool RecvExact(SOCKET s, uint8_t *dst, size_t len);

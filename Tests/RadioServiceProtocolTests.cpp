@@ -162,6 +162,12 @@ void RadioServiceProtocolTests::WatchdogCircuitBreakerAndHealthyReset()
     wd.ClearGuard();
     QVERIFY(!wd.IsGuardTripped());
 
+    // A critical PnP query-remove timeout (Error 481) trips the guard immediately without retrying.
+    wd.TripGuardImmediately();
+    QVERIFY(wd.IsGuardTripped());
+    wd.ClearGuard();
+    QVERIFY(!wd.IsGuardTripped());
+
     // Adapter reset budget caps at 3 per 24h.
     QVERIFY(wd.AllowAdapterReset(1'000));
     QVERIFY(wd.AllowAdapterReset(2'000));

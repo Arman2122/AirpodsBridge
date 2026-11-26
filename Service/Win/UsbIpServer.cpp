@@ -332,13 +332,13 @@ std::optional<int> UsbIpServer::AttachLocalDevice(const std::string &busId)
     return 1;
 }
 
-bool UsbIpServer::DetachLocalPort(int usbipPort)
+bool UsbIpServer::DetachLocalPort(int usbipPort, DWORD timeoutMs)
 {
     if (usbipPort <= 0) {
         return true;
     }
     std::string out;
-    const bool ok = RunUsbipCommand(L"detach -p " + std::to_wstring(usbipPort), out, 10000);
+    const bool ok = RunUsbipCommand(L"detach -p " + std::to_wstring(usbipPort), out, timeoutMs);
     if (!ok) {
         ServiceLog::Write(
             LogLevel::Warn, "usbip",
@@ -347,10 +347,10 @@ bool UsbIpServer::DetachLocalPort(int usbipPort)
     return ok;
 }
 
-uint32_t UsbIpServer::DetachAllPortsForBusId(const std::string &busId)
+uint32_t UsbIpServer::DetachAllPortsForBusId(const std::string &busId, DWORD timeoutMs)
 {
     std::string out;
-    if (!RunUsbipCommand(L"port", out, 10000) || out.empty()) {
+    if (!RunUsbipCommand(L"port", out, timeoutMs) || out.empty()) {
         return 0;
     }
 
@@ -382,7 +382,7 @@ uint32_t UsbIpServer::DetachAllPortsForBusId(const std::string &busId)
 
     uint32_t detached = 0;
     for (int port : matchingPorts) {
-        if (DetachLocalPort(port)) {
+        if (DetachLocalPort(port, timeoutMs)) {
             ++detached;
             ServiceLog::Write(
                 LogLevel::Info, "usbip",

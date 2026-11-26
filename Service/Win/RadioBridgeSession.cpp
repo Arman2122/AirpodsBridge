@@ -51,6 +51,8 @@ RadioBridgeSession::RadioBridgeSession(
 RadioBridgeSession::~RadioBridgeSession()
 {
     Stop();
+    std::lock_guard<std::mutex> wlock{_writeMutex};
+    _socket.Reset();
 }
 
 void RadioBridgeSession::Stop()
@@ -63,8 +65,11 @@ void RadioBridgeSession::Stop()
         SetEvent(_stopEvent.Get());
     }
 
-    if (_socket.Valid()) {
-        shutdown(_socket.Get(), SD_BOTH);
+    {
+        std::lock_guard<std::mutex> wlock{_writeMutex};
+        if (_socket.Valid()) {
+            shutdown(_socket.Get(), SD_BOTH);
+        }
     }
 
     {
@@ -97,7 +102,6 @@ void RadioBridgeSession::Stop()
             pq->worker.join();
         }
     }
-    _socket.Reset();
 }
 
 void RadioBridgeSession::Run()

@@ -67,6 +67,12 @@ void WatchdogPolicy::ClearGuard()
     _sessionActive = false;
 }
 
+void WatchdogPolicy::TripGuardImmediately()
+{
+    _guardTripped = true;
+    _sessionActive = false;
+}
+
 bool WatchdogPolicy::IsGuardTripped() const noexcept
 {
     return _guardTripped;

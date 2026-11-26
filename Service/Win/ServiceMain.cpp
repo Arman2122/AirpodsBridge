@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Arman2122
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+#include <atomic>
 #include <cstdio>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "Service/Protocol/ServiceProtocol.h"
 #include "Service/Win/NativeSetup.h"
@@ -21,10 +23,36 @@ constexpr wchar_t kServiceDescription[] =
     L"Provides two-way Apple Accessory Protocol (AAP) control and stereo-safe AirPods audio "
     L"without Test Mode using inbox WinUSB and signed usbip-win2.";
 
+constexpr DWORD kPreshutdownTimeoutMs = 15000;
+
 SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 SERVICE_STATUS gServiceStatus{};
 Service::Win::RadioEngine *gEngine = nullptr;
 HANDLE gStopEvent = nullptr;
+std::atomic<bool> gSystemShutdown{false};
+std::atomic<DWORD> gCheckPoint{0};
+
+void ConfigurePreshutdownTimeout(SC_HANDLE svc)
+{
+    if (svc == nullptr) {
+        return;
+    }
+    SERVICE_PRESHUTDOWN_INFO info{};
+    info.dwPreshutdownTimeout = kPreshutdownTimeoutMs;
+    ChangeServiceConfig2W(svc, SERVICE_CONFIG_PRESHUTDOWN_INFO, &info);
+}
+
+void EnsureSelfPreshutdownConfigured()
+{
+    Service::Win::UniqueScHandle scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
+    if (!scm.Valid()) {
+        return;
+    }
+    Service::Win::UniqueScHandle svc{OpenServiceW(scm.Get(), kServiceName, SERVICE_CHANGE_CONFIG)};
+    if (svc.Valid()) {
+        ConfigurePreshutdownTimeout(svc.Get());
+    }
+}
 
 void ReportServiceState(DWORD state, DWORD exitCode = NO_ERROR, DWORD waitHint = 0)
 {
@@ -34,10 +62,23 @@ void ReportServiceState(DWORD state, DWORD exitCode = NO_ERROR, DWORD waitHint =
     gServiceStatus.dwCurrentState = state;
     gServiceStatus.dwWin32ExitCode = exitCode;
     gServiceStatus.dwWaitHint = waitHint;
-    gServiceStatus.dwControlsAccepted =
-        (state == SERVICE_RUNNING)
-            ? (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT)
-            : 0;
+    if (state == SERVICE_RUNNING) {
+        gCheckPoint.store(0);
+        gServiceStatus.dwCheckPoint = 0;
+        // Accept SERVICE_ACCEPT_PRESHUTDOWN so SCM notifies us BEFORE tcpip, DeviceInstall, and
+        // kernel power-down start, letting us detach usbip2_ude virtual devices cleanly.
+        gServiceStatus.dwControlsAccepted =
+            SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_POWEREVENT;
+    }
+    else if (state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING) {
+        gServiceStatus.dwCheckPoint = gCheckPoint.fetch_add(1) + 1;
+        gServiceStatus.dwControlsAccepted = 0;
+    }
+    else {
+        gCheckPoint.store(0);
+        gServiceStatus.dwCheckPoint = 0;
+        gServiceStatus.dwControlsAccepted = 0;
+    }
     SetServiceStatus(gStatusHandle, &gServiceStatus);
 }
 
@@ -45,9 +86,17 @@ DWORD WINAPI
 ServiceCtrlHandlerEx(DWORD control, DWORD eventType, LPVOID /*eventData*/, LPVOID /*ctx*/)
 {
     switch (control) {
-    case SERVICE_CONTROL_STOP:
+    case SERVICE_CONTROL_PRESHUTDOWN:
     case SERVICE_CONTROL_SHUTDOWN:
-        ReportServiceState(SERVICE_STOP_PENDING, NO_ERROR, 10000);
+        gSystemShutdown.store(true);
+        ReportServiceState(SERVICE_STOP_PENDING, NO_ERROR, kPreshutdownTimeoutMs);
+        if (gStopEvent != nullptr) {
+            SetEvent(gStopEvent);
+        }
+        return NO_ERROR;
+
+    case SERVICE_CONTROL_STOP:
+        ReportServiceState(SERVICE_STOP_PENDING, NO_ERROR, kPreshutdownTimeoutMs);
         if (gStopEvent != nullptr) {
             SetEvent(gStopEvent);
         }
@@ -75,6 +124,8 @@ ServiceCtrlHandlerEx(DWORD control, DWORD eventType, LPVOID /*eventData*/, LPVOI
 void WINAPI ServiceMainEntry(DWORD /*argc*/, LPWSTR * /*argv*/)
 {
     Service::Win::ServiceLog::Initialize(false);
+    gSystemShutdown.store(false);
+    gCheckPoint.store(0);
     gServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     gStatusHandle = RegisterServiceCtrlHandlerExW(kServiceName, ServiceCtrlHandlerEx, nullptr);
     if (gStatusHandle == nullptr) {
@@ -82,6 +133,7 @@ void WINAPI ServiceMainEntry(DWORD /*argc*/, LPWSTR * /*argv*/)
     }
 
     ReportServiceState(SERVICE_START_PENDING, NO_ERROR, 5000);
+    EnsureSelfPreshutdownConfigured();
     gStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
     Service::Win::RadioEngine engine;
@@ -93,8 +145,27 @@ void WINAPI ServiceMainEntry(DWORD /*argc*/, LPWSTR * /*argv*/)
         WaitForSingleObject(gStopEvent, INFINITE);
     }
 
-    ReportServiceState(SERVICE_STOP_PENDING, NO_ERROR, 10000);
-    engine.Stop();
+    ReportServiceState(SERVICE_STOP_PENDING, NO_ERROR, kPreshutdownTimeoutMs);
+
+    // Keep advancing dwCheckPoint while virtual USB/IP ports detach cleanly so SCM never
+    // prematurely kills the service during preshutdown.
+    std::atomic<bool> stopping{true};
+    std::thread heartbeat{[&stopping] {
+        while (stopping.load()) {
+            Sleep(1000);
+            if (stopping.load()) {
+                ReportServiceState(SERVICE_STOP_PENDING, NO_ERROR, kPreshutdownTimeoutMs);
+            }
+        }
+    }};
+
+    engine.Stop(gSystemShutdown.load());
+
+    stopping.store(false);
+    if (heartbeat.joinable()) {
+        heartbeat.join();
+    }
+
     gEngine = nullptr;
     if (gStopEvent != nullptr) {
         CloseHandle(gStopEvent);
@@ -146,6 +217,7 @@ int InstallService()
     SERVICE_DESCRIPTIONW desc{};
     desc.lpDescription = const_cast<LPWSTR>(kServiceDescription);
     ChangeServiceConfig2W(svc.Get(), SERVICE_CONFIG_DESCRIPTION, &desc);
+    ConfigurePreshutdownTimeout(svc.Get());
 
     // Automatic SCM recovery: restart up to 2 times with delay, then stop (watchdog handles
     // rollback).
@@ -170,6 +242,7 @@ int UninstallService()
 {
     Service::Win::RegistryStore::SetUninstalling(true);
 
+    bool stopped = true;
     Service::Win::UniqueScHandle scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
     if (scm.Valid()) {
         Service::Win::UniqueScHandle svc{
@@ -177,19 +250,39 @@ int UninstallService()
         if (svc.Valid()) {
             SERVICE_STATUS st{};
             ControlService(svc.Get(), SERVICE_CONTROL_STOP, &st);
-            for (int i = 0; i < 40; ++i) {
+            stopped = false;
+            for (int i = 0; i < 100; ++i) {
                 if (!QueryServiceStatus(svc.Get(), &st) || st.dwCurrentState == SERVICE_STOPPED) {
+                    stopped = true;
                     break;
                 }
                 Sleep(250);
             }
-            DeleteService(svc.Get());
+            if (stopped) {
+                DeleteService(svc.Get());
+            }
         }
     }
 
-    Service::Win::RadioDriverManager::RestoreAllBoundAdapters();
-    Service::Win::RegistryStore::SetGuardTripped(false);
+    if (!stopped) {
+        Service::Win::RegistryStore::SetUninstalling(false);
+        std::fprintf(
+            stderr, "Timed out waiting for %ls to stop; restart Windows before uninstalling.\n",
+            kServiceName);
+        return 1;
+    }
+
+    const bool restored = Service::Win::RadioDriverManager::RestoreAllBoundAdapters();
     Service::Win::RegistryStore::SetUninstalling(false);
+    if (!restored) {
+        std::fprintf(
+            stderr,
+            "Uninstalled %ls, but native Bluetooth driver restore reported an error; restart "
+            "Windows to finish restoring.\n",
+            kServiceName);
+        return 1;
+    }
+    Service::Win::RegistryStore::SetGuardTripped(false);
     std::printf("Uninstalled %ls and restored native Bluetooth driver.\n", kServiceName);
     return 0;
 }

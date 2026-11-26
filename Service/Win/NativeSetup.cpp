@@ -375,20 +375,28 @@ bool DownloadAndInstallUsbipWin2(bool &rebootNeeded, std::string &errOut)
     return false;
 }
 
-bool StopAndWaitService(SC_HANDLE scm)
+bool StopAndWaitService(SC_HANDLE scm, int maxWaitMs = 25000)
 {
     UniqueScHandle svc{OpenServiceW(scm, kServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS)};
     if (!svc.Valid()) {
         return true;
     }
     SERVICE_STATUS st{};
+    if (QueryServiceStatus(svc.Get(), &st) && st.dwCurrentState == SERVICE_STOPPED) {
+        return true;
+    }
     ControlService(svc.Get(), SERVICE_CONTROL_STOP, &st);
-    for (int i = 0; i < 40; ++i) {
+    const int iterations = std::max(1, maxWaitMs / 250);
+    for (int i = 0; i < iterations; ++i) {
         if (!QueryServiceStatus(svc.Get(), &st) || st.dwCurrentState == SERVICE_STOPPED) {
             return true;
         }
         Sleep(250);
     }
+    ServiceLog::Write(
+        LogLevel::Error, "setup",
+        "Timed out after " + std::to_string(maxWaitMs) +
+            " ms waiting for AirpodsBridgeService to stop.");
     return false;
 }
 
@@ -435,11 +443,19 @@ int NativeSetup::RunEnable()
         return 1;
     }
 
-    StopAndWaitService(scm.Get());
+    if (!StopAndWaitService(scm.Get(), 25000)) {
+        WriteProgress(
+            "error", 100,
+            "Existing AirpodsBridgeService is still stopping. Wait a moment or restart Windows "
+            "before enabling again.");
+        ServiceLog::Shutdown();
+        return 1;
+    }
 
     wchar_t selfPath[MAX_PATH]{};
     if (GetModuleFileNameW(nullptr, selfPath, MAX_PATH) == 0) {
         WriteProgress("error", 100, "Could not resolve service executable path.");
+        ServiceLog::Shutdown();
         return 1;
     }
 
@@ -447,9 +463,20 @@ int NativeSetup::RunEnable()
     std::error_code ec;
     std::filesystem::create_directories(targetExe.parent_path(), ec);
     if (!std::filesystem::equivalent(std::filesystem::path{selfPath}, targetExe, ec)) {
-        if (!CopyFileW(selfPath, targetExe.c_str(), FALSE)) {
+        bool copied = false;
+        DWORD lastErr = ERROR_SUCCESS;
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            if (CopyFileW(selfPath, targetExe.c_str(), FALSE)) {
+                copied = true;
+                break;
+            }
+            lastErr = GetLastError();
+            Sleep(200);
+        }
+        if (!copied) {
             WriteProgress(
-                "error", 100, "Failed to copy service binary: " + FormatWin32Error(GetLastError()));
+                "error", 100, "Failed to copy service binary: " + FormatWin32Error(lastErr));
+            ServiceLog::Shutdown();
             return 1;
         }
     }
@@ -477,6 +504,10 @@ int NativeSetup::RunEnable()
     SERVICE_DESCRIPTIONW desc{};
     desc.lpDescription = const_cast<LPWSTR>(kServiceDescription);
     ChangeServiceConfig2W(svc.Get(), SERVICE_CONFIG_DESCRIPTION, &desc);
+
+    SERVICE_PRESHUTDOWN_INFO preshutdown{};
+    preshutdown.dwPreshutdownTimeout = 15000;
+    ChangeServiceConfig2W(svc.Get(), SERVICE_CONFIG_PRESHUTDOWN_INFO, &preshutdown);
 
     SC_ACTION actions[3] = {
         {SC_ACTION_RESTART, 3000},
@@ -531,20 +562,41 @@ int NativeSetup::RunDisable()
     WriteProgress("running", 15, "Stopping AirpodsBridge Control Engine...");
     RegistryStore::SetUninstalling(true);
 
+    bool serviceStopped = true;
     UniqueScHandle scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
     if (scm.Valid()) {
-        StopAndWaitService(scm.Get());
-        UniqueScHandle svc{OpenServiceW(scm.Get(), kServiceName, DELETE)};
-        if (svc.Valid()) {
-            DeleteService(svc.Get());
+        serviceStopped = StopAndWaitService(scm.Get(), 25000);
+        if (serviceStopped) {
+            UniqueScHandle svc{OpenServiceW(scm.Get(), kServiceName, DELETE)};
+            if (svc.Valid()) {
+                DeleteService(svc.Get());
+            }
         }
     }
 
-    WriteProgress("running", 65, "Restoring native Windows Bluetooth driver...");
-    RadioDriverManager::RestoreAllBoundAdapters();
-    RegistryStore::SetGuardTripped(false);
-    RegistryStore::SetUninstalling(false);
+    if (!serviceStopped) {
+        RegistryStore::SetUninstalling(false);
+        WriteProgress(
+            "error", 100,
+            "AirpodsBridgeService could not stop cleanly. Restart Windows and disable again so "
+            "the native Bluetooth driver can be restored safely.");
+        ServiceLog::Shutdown();
+        return 1;
+    }
 
+    WriteProgress("running", 65, "Restoring native Windows Bluetooth driver...");
+    const bool restored = RadioDriverManager::RestoreAllBoundAdapters();
+    RegistryStore::SetUninstalling(false);
+    if (!restored) {
+        WriteProgress(
+            "error", 100,
+            "Could not restore the native Windows Bluetooth driver while a device was busy. "
+            "Restart Windows to finish restoring native Bluetooth.");
+        ServiceLog::Shutdown();
+        return 1;
+    }
+
+    RegistryStore::SetGuardTripped(false);
     WriteProgress(
         "ok", 100, "Control Engine disabled and native Windows Bluetooth driver restored.");
     ServiceLog::Shutdown();
@@ -556,12 +608,29 @@ int NativeSetup::RunRestoreNative()
     ServiceLog::Initialize(false);
     WriteProgress("running", 25, "Stopping service and restoring native Bluetooth driver...");
 
+    bool serviceStopped = true;
     UniqueScHandle scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
     if (scm.Valid()) {
-        StopAndWaitService(scm.Get());
+        serviceStopped = StopAndWaitService(scm.Get(), 25000);
     }
 
-    RadioDriverManager::RestoreAllBoundAdapters();
+    if (!serviceStopped) {
+        WriteProgress(
+            "error", 100,
+            "AirpodsBridgeService could not stop cleanly. Restart Windows before restoring the "
+            "native Bluetooth driver.");
+        ServiceLog::Shutdown();
+        return 1;
+    }
+
+    if (!RadioDriverManager::RestoreAllBoundAdapters()) {
+        WriteProgress(
+            "error", 100,
+            "Could not restore the native Windows Bluetooth driver cleanly. Restart Windows and "
+            "retry.");
+        ServiceLog::Shutdown();
+        return 1;
+    }
     RegistryStore::SetGuardTripped(false);
 
     WriteProgress("ok", 100, "Native Windows Bluetooth driver restored.");

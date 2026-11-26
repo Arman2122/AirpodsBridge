@@ -45,7 +45,7 @@ public:
     RadioEngine &operator=(const RadioEngine &) = delete;
 
     void Start();
-    void Stop();
+    void Stop(bool systemShutdown = false);
 
     void OnSystemSuspend();
     void OnSystemResume();
@@ -55,6 +55,7 @@ public:
 private:
     void SupervisorLoop();
     void RunTakeoverCycle();
+    void WaitInterruptible(uint32_t ms);
     void HandleUsbIpImport(const std::string &busId, UniqueSocket clientSocket);
     void HandlePipeFrame(uint64_t clientId, const Protocol::Frame &frame);
     void BroadcastStatus();
@@ -65,6 +66,7 @@ private:
     std::atomic<bool> _running{false};
     std::atomic<bool> _suspended{false};
     std::atomic<bool> _restoreRequested{false};
+    std::atomic<bool> _systemShutdown{false};
 
     mutable std::mutex _stateMutex;
     std::condition_variable _supervisorCv;

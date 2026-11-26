@@ -45,6 +45,153 @@ constexpr wchar_t kUsbDeviceInterfaceStr[] = L"{a5dcbf10-6530-11d2-901f-00c04fb9
 constexpr wchar_t kCompositeFunctionInterfaceStr[] = L"{9e4a7c31-52b8-4d6e-8c1a-3f7e2d90b415}";
 constexpr wchar_t kAapServicePrefix[] = L"BTHENUM\\{74EC2172-0BAD-4D01-8F77-997B2BE0722A}";
 constexpr wchar_t kEnumRoot[] = L"SYSTEM\\CurrentControlSet\\Enum";
+constexpr wchar_t kDriverSwapMutexName[] = L"Global\\AirpodsBridgeDriverSwapMutex";
+
+// Cross-process lock serializing all DiInstallDevice calls between AirpodsBridgeService and
+// elevated NativeSetup helpers so two processes never race PnP query-remove on the same radio.
+class ScopedDriverSwapLock
+{
+public:
+    explicit ScopedDriverSwapLock(DWORD waitMs = 60000)
+        : _mutex{CreateMutexW(nullptr, FALSE, kDriverSwapMutexName)}
+    {
+        if (!_mutex.Valid()) {
+            return;
+        }
+        const DWORD wait = WaitForSingleObject(_mutex.Get(), waitMs);
+        _locked = (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED);
+        if (!_locked) {
+            ServiceLog::Write(
+                LogLevel::Warn, "driver", "Timed out waiting for cross-process driver swap mutex.");
+        }
+    }
+
+    ~ScopedDriverSwapLock()
+    {
+        if (_locked && _mutex.Valid()) {
+            ReleaseMutex(_mutex.Get());
+        }
+    }
+
+    bool Locked() const noexcept
+    {
+        return _locked;
+    }
+
+private:
+    UniqueHandle _mutex;
+    bool _locked{false};
+};
+
+// Quiesces Windows Bluetooth user-mode services (BTAGService, BthAvctpSvc, BluetoothUserService_*,
+// bthserv) before DiInstallDevice swaps a live BTHUSB adapter to WinUSB. Without releasing active
+// RFCOMM/HFP/AVCTP handles first, BTH\MS_RFCOMM can deadlock inside IRP_MN_QUERY_REMOVE_DEVICE
+// (Win32 Error 481), permanently wedging kernel PnP until Windows BSODs with 0x9F (0x4, 0x12c) on
+// shutdown. Restarts only the services that were running beforehand in reverse dependency order.
+class ScopedBluetoothServicesQuiesce
+{
+public:
+    ScopedBluetoothServicesQuiesce()
+        : _scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE)}
+    {
+        if (!_scm.Valid()) {
+            return;
+        }
+
+        // Stop leaf services before bthserv so every open RFCOMM/HFP/SDP handle drains cleanly.
+        StopIfRunning(L"BTAGService");
+        StopIfRunning(L"BthAvctpSvc");
+
+        // Discover per-user BluetoothUserService_<LUID> dependents of bthserv dynamically.
+        {
+            UniqueScHandle bth{OpenServiceW(
+                _scm.Get(), L"bthserv", SERVICE_ENUMERATE_DEPENDENTS | SERVICE_QUERY_STATUS)};
+            if (bth.Valid()) {
+                DWORD bytesNeeded = 0;
+                DWORD count = 0;
+                EnumDependentServicesW(bth.Get(), SERVICE_ACTIVE, nullptr, 0, &bytesNeeded, &count);
+                if (bytesNeeded > 0) {
+                    std::vector<uint8_t> buf(bytesNeeded);
+                    auto *entries = reinterpret_cast<LPENUM_SERVICE_STATUSW>(buf.data());
+                    if (EnumDependentServicesW(
+                            bth.Get(), SERVICE_ACTIVE, entries, bytesNeeded, &bytesNeeded, &count))
+                    {
+                        for (DWORD i = 0; i < count; ++i) {
+                            if (entries[i].lpServiceName != nullptr) {
+                                StopIfRunning(entries[i].lpServiceName);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        StopIfRunning(L"bthserv");
+
+        if (!_stoppedServices.empty()) {
+            ServiceLog::Write(
+                LogLevel::Info, "driver",
+                "Quiesced " + std::to_string(_stoppedServices.size()) +
+                    " Bluetooth service(s) before WinUSB swap to prevent BTH\\MS_RFCOMM "
+                    "query-remove deadlock.");
+            // Give BTHPORT / rfcomm.sys a brief settle window to complete TDI handle rundown.
+            Sleep(300);
+        }
+    }
+
+    ~ScopedBluetoothServicesQuiesce()
+    {
+        if (!_scm.Valid() || _stoppedServices.empty()) {
+            return;
+        }
+        // Restart in reverse order (root `bthserv` first, then leaf/user services).
+        for (auto it = _stoppedServices.rbegin(); it != _stoppedServices.rend(); ++it) {
+            UniqueScHandle svc{OpenServiceW(_scm.Get(), it->c_str(), SERVICE_START)};
+            if (svc.Valid()) {
+                StartServiceW(svc.Get(), 0, nullptr);
+            }
+        }
+        ServiceLog::Write(
+            LogLevel::Info, "driver",
+            "Restarted " + std::to_string(_stoppedServices.size()) +
+                " quiesced Bluetooth service(s).");
+    }
+
+private:
+    void StopIfRunning(const wchar_t *name)
+    {
+        UniqueScHandle svc{OpenServiceW(_scm.Get(), name, SERVICE_STOP | SERVICE_QUERY_STATUS)};
+        if (!svc.Valid()) {
+            return;
+        }
+        SERVICE_STATUS st{};
+        if (!QueryServiceStatus(svc.Get(), &st) || st.dwCurrentState == SERVICE_STOPPED) {
+            return;
+        }
+        if (st.dwCurrentState != SERVICE_STOP_PENDING) {
+            if (!ControlService(svc.Get(), SERVICE_CONTROL_STOP, &st)) {
+                const DWORD err = GetLastError();
+                if (err != ERROR_SERVICE_NOT_ACTIVE) {
+                    return;
+                }
+            }
+        }
+        for (int i = 0; i < 40; ++i) {
+            if (!QueryServiceStatus(svc.Get(), &st) || st.dwCurrentState == SERVICE_STOPPED) {
+                _stoppedServices.emplace_back(name);
+                return;
+            }
+            Sleep(100);
+        }
+        ServiceLog::Write(
+            LogLevel::Warn, "driver",
+            "Timed out waiting for Bluetooth service " + WideToUtf8(name) + " to stop.");
+        _stoppedServices.emplace_back(name);
+    }
+
+    UniqueScHandle _scm;
+    std::vector<std::wstring> _stoppedServices;
+};
 
 bool StartsWithIgnoreCase(std::wstring_view s, std::wstring_view prefix)
 {
@@ -232,34 +379,39 @@ bool IsAudioProfileDevNode(std::wstring_view instanceId)
     return false;
 }
 
-bool InstallDriver(const std::wstring &instanceId, bool toWinUsb, bool &rebootRequired)
+bool InstallDriver(
+    const std::wstring &instanceId, bool toWinUsb, bool &rebootRequired, uint32_t &win32ErrorOut)
 {
     rebootRequired = false;
+    win32ErrorOut = ERROR_SUCCESS;
 
     UniqueDevInfo set{SetupDiCreateDeviceInfoList(nullptr, nullptr)};
     if (!set.Valid()) {
+        win32ErrorOut = GetLastError();
         ServiceLog::Write(
             LogLevel::Error, "driver",
-            "SetupDiCreateDeviceInfoList failed: " + FormatWin32Error(GetLastError()));
+            "SetupDiCreateDeviceInfoList failed: " + FormatWin32Error(win32ErrorOut));
         return false;
     }
 
     SP_DEVINFO_DATA dev{};
     dev.cbSize = sizeof(dev);
     if (!SetupDiOpenDeviceInfoW(set.Get(), instanceId.c_str(), nullptr, 0, &dev)) {
+        win32ErrorOut = GetLastError();
         ServiceLog::Write(
             LogLevel::Error, "driver",
             "SetupDiOpenDeviceInfoW failed for " + WideToUtf8(instanceId) + ": " +
-                FormatWin32Error(GetLastError()));
+                FormatWin32Error(win32ErrorOut));
         return false;
     }
 
     SP_DEVINSTALL_PARAMS_W params{};
     params.cbSize = sizeof(params);
     if (!SetupDiGetDeviceInstallParamsW(set.Get(), &dev, &params)) {
+        win32ErrorOut = GetLastError();
         ServiceLog::Write(
             LogLevel::Error, "driver",
-            "SetupDiGetDeviceInstallParamsW failed: " + FormatWin32Error(GetLastError()));
+            "SetupDiGetDeviceInstallParamsW failed: " + FormatWin32Error(win32ErrorOut));
         return false;
     }
 
@@ -267,6 +419,7 @@ bool InstallDriver(const std::wstring &instanceId, bool toWinUsb, bool &rebootRe
     if (toWinUsb) {
         wchar_t infPath[MAX_PATH]{};
         if (ExpandEnvironmentStringsW(L"%SystemRoot%\\INF\\winusb.inf", infPath, MAX_PATH) == 0) {
+            win32ErrorOut = GetLastError();
             return false;
         }
         params.Flags |= DI_ENUMSINGLEINF;
@@ -281,10 +434,11 @@ bool InstallDriver(const std::wstring &instanceId, bool toWinUsb, bool &rebootRe
                 set.Get(), &dev, SPDRP_CLASSGUID, reinterpret_cast<const BYTE *>(kUsbClassStr),
                 sizeof(kUsbClassStr)))
         {
+            win32ErrorOut = GetLastError();
             ServiceLog::Write(
                 LogLevel::Error, "driver",
                 "SetupDiSetDeviceRegistryPropertyW(SPDRP_CLASSGUID) failed: " +
-                    FormatWin32Error(GetLastError()));
+                    FormatWin32Error(win32ErrorOut));
             return false;
         }
         dev.ClassGuid = kUsbDeviceClassGuid;
@@ -293,9 +447,10 @@ bool InstallDriver(const std::wstring &instanceId, bool toWinUsb, bool &rebootRe
     if (!SetupDiSetDeviceInstallParamsW(set.Get(), &dev, &params) ||
         !SetupDiBuildDriverInfoList(set.Get(), &dev, driverType))
     {
+        win32ErrorOut = GetLastError();
         ServiceLog::Write(
             LogLevel::Error, "driver",
-            "SetupDiBuildDriverInfoList failed: " + FormatWin32Error(GetLastError()));
+            "SetupDiBuildDriverInfoList failed: " + FormatWin32Error(win32ErrorOut));
         return false;
     }
 
@@ -315,6 +470,7 @@ bool InstallDriver(const std::wstring &instanceId, bool toWinUsb, bool &rebootRe
             }
         }
         if (!found || !SetupDiSetSelectedDriverW(set.Get(), &dev, &chosen)) {
+            win32ErrorOut = GetLastError();
             ServiceLog::Write(
                 LogLevel::Error, "driver",
                 "Failed to select inbox WinUsb Device driver from winusb.inf.");
@@ -323,9 +479,10 @@ bool InstallDriver(const std::wstring &instanceId, bool toWinUsb, bool &rebootRe
     }
     else {
         if (!SetupDiCallClassInstaller(DIF_SELECTBESTCOMPATDRV, set.Get(), &dev)) {
+            win32ErrorOut = GetLastError();
             ServiceLog::Write(
                 LogLevel::Error, "driver",
-                "DIF_SELECTBESTCOMPATDRV failed: " + FormatWin32Error(GetLastError()));
+                "DIF_SELECTBESTCOMPATDRV failed: " + FormatWin32Error(win32ErrorOut));
             return false;
         }
     }
@@ -336,9 +493,10 @@ bool InstallDriver(const std::wstring &instanceId, bool toWinUsb, bool &rebootRe
     if (!SetupDiGetSelectedDriverW(set.Get(), &dev, &selected) ||
         !DiInstallDevice(nullptr, set.Get(), &dev, &selected, 0, &needReboot))
     {
+        win32ErrorOut = GetLastError();
         ServiceLog::Write(
             LogLevel::Error, "driver",
-            "DiInstallDevice failed: " + FormatWin32Error(GetLastError()));
+            "DiInstallDevice failed: " + FormatWin32Error(win32ErrorOut));
         return false;
     }
 
@@ -571,8 +729,26 @@ std::string RadioDriverManager::DescribeDeviceState(const std::wstring &instance
     return std::string{buf};
 }
 
-bool RadioDriverManager::BindWinUsb(const std::wstring &instanceId, bool &rebootRequired)
+bool RadioDriverManager::BindWinUsb(
+    const std::wstring &instanceId, bool &rebootRequired, uint32_t *win32ErrorOut)
 {
+    rebootRequired = false;
+    if (win32ErrorOut != nullptr) {
+        *win32ErrorOut = ERROR_SUCCESS;
+    }
+
+    ScopedDriverSwapLock swapLock;
+    if (!swapLock.Locked()) {
+        if (win32ErrorOut != nullptr) {
+            *win32ErrorOut = ERROR_TIMEOUT;
+        }
+        return false;
+    }
+
+    if (IsOnWinUsb(instanceId)) {
+        return true;
+    }
+
     RegistryStore::RememberBoundInstance(instanceId);
 
     if (IsCompositeFunction(instanceId)) {
@@ -597,7 +773,16 @@ bool RadioDriverManager::BindWinUsb(const std::wstring &instanceId, bool &reboot
         }
     }
 
-    const bool ok = InstallDriver(instanceId, true, rebootRequired);
+    // Quiesce Windows Bluetooth services holding RFCOMM/HFP/AVCTP handles on the native stack so
+    // DiInstallDevice's PnP query-remove never deadlocks BTH\MS_RFCOMM (Error 481 -> BSOD
+    // 0x9F/0x4).
+    ScopedBluetoothServicesQuiesce btQuiesce;
+
+    uint32_t err = ERROR_SUCCESS;
+    const bool ok = InstallDriver(instanceId, true, rebootRequired, err);
+    if (win32ErrorOut != nullptr) {
+        *win32ErrorOut = err;
+    }
     if (ok && (rebootRequired || NeedsRestart(instanceId))) {
         ServiceLog::Write(
             LogLevel::Info, "driver",
@@ -609,14 +794,35 @@ bool RadioDriverManager::BindWinUsb(const std::wstring &instanceId, bool &reboot
     return ok;
 }
 
-bool RadioDriverManager::RestoreNative(const std::wstring &instanceId, bool &rebootRequired)
+bool RadioDriverManager::RestoreNative(
+    const std::wstring &instanceId, bool &rebootRequired, uint32_t *win32ErrorOut)
 {
+    rebootRequired = false;
+    if (win32ErrorOut != nullptr) {
+        *win32ErrorOut = ERROR_SUCCESS;
+    }
+
+    ScopedDriverSwapLock swapLock;
+    if (!swapLock.Locked()) {
+        if (win32ErrorOut != nullptr) {
+            *win32ErrorOut = ERROR_TIMEOUT;
+        }
+        return false;
+    }
+
     if (!IsPresent(instanceId)) {
         MarkForReinstall(instanceId);
         rebootRequired = false;
         return true;
     }
-    const bool ok = InstallDriver(instanceId, false, rebootRequired);
+    if (!IsOnWinUsb(instanceId)) {
+        return true;
+    }
+    uint32_t err = ERROR_SUCCESS;
+    const bool ok = InstallDriver(instanceId, false, rebootRequired, err);
+    if (win32ErrorOut != nullptr) {
+        *win32ErrorOut = err;
+    }
     if (ok && (rebootRequired || NeedsRestart(instanceId))) {
         if (CycleHubPort(instanceId)) {
             rebootRequired = false;
@@ -700,19 +906,30 @@ bool RadioDriverManager::MarkForReinstall(const std::wstring &instanceId)
            CR_SUCCESS;
 }
 
-void RadioDriverManager::RestoreAllBoundAdapters()
+bool RadioDriverManager::RestoreAllBoundAdapters()
 {
+    bool allOk = true;
     for (const auto &id : RegistryStore::GetBoundInstances()) {
         bool reboot = false;
         if (IsPresent(id)) {
             if (IsOnWinUsb(id)) {
-                RestoreNative(id, reboot);
+                uint32_t err = ERROR_SUCCESS;
+                if (!RestoreNative(id, reboot, &err)) {
+                    allOk = false;
+                    if (err == kErrorPnpQueryRemoveTimeout) {
+                        ServiceLog::ReportEventLogError(
+                            "AirpodsBridgeService hit PnP query-remove timeout (Error 481) while "
+                            "restoring Bluetooth adapter; aborting further driver install calls.");
+                        break;
+                    }
+                }
             }
         }
         else {
             MarkForReinstall(id);
         }
     }
+    return allOk;
 }
 
 uint32_t RadioDriverManager::ForgetHiddenVirtualAudioNodes(const std::wstring &physicalInstanceId)

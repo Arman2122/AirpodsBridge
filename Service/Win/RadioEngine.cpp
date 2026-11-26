@@ -141,7 +141,7 @@ RadioEngine::RadioEngine() : _watchdog{RegistryStore::GetGuardTripped()}
 
 RadioEngine::~RadioEngine()
 {
-    Stop();
+    Stop(false);
 }
 
 void RadioEngine::Start()
@@ -149,6 +149,7 @@ void RadioEngine::Start()
     if (_running.exchange(true)) {
         return;
     }
+    _systemShutdown.store(false);
 
     SetState(Protocol::RadioServiceState::Starting, "Starting AirpodsBridge Radio Service.");
 
@@ -163,27 +164,38 @@ void RadioEngine::Start()
     _supervisorThread = std::thread{&RadioEngine::SupervisorLoop, this};
 }
 
-void RadioEngine::Stop()
+void RadioEngine::WaitInterruptible(uint32_t ms)
 {
+    if (ms == 0 || !_running.load()) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock{_stateMutex};
+    _supervisorCv.wait_for(lock, std::chrono::milliseconds(ms), [&] {
+        return !_running.load() || _suspended.load() || _restoreRequested.load();
+    });
+}
+
+void RadioEngine::Stop(bool systemShutdown)
+{
+    if (systemShutdown) {
+        _systemShutdown.store(true);
+    }
     if (!_running.exchange(false)) {
         return;
     }
 
+    ServiceLog::Write(
+        LogLevel::Info, "engine",
+        systemShutdown ? "Stopping RadioEngine for Windows preshutdown/shutdown."
+                       : "Stopping RadioEngine.");
+
     _supervisorCv.notify_all();
     _radioImportCv.notify_all();
 
-    {
-        std::shared_ptr<RadioBridgeSession> sess;
-        {
-            std::lock_guard<std::mutex> lock{_sessionMutex};
-            sess = _radioSession;
-        }
-        if (sess) {
-            sess->Stop();
-        }
-    }
+    const DWORD detachTimeoutMs = systemShutdown ? 3500u : 6000u;
 
-    // Tear down virtual mic if attached.
+    // 1. Detach virtual UAC1 microphone BEFORE closing its TCP session so usbip2_ude can complete
+    //    any pending unplug URBs cleanly without stalling kernel shutdown/power transitions.
     {
         std::unique_ptr<MicBridgeSession> micSess;
         int micPort = 0;
@@ -192,14 +204,38 @@ void RadioEngine::Stop()
             _micWanted = false;
             DetachVirtualMicLocked(micSess, micPort);
         }
+        if (micPort > 0) {
+            UsbIpServer::DetachLocalPort(micPort, detachTimeoutMs);
+        }
         if (micSess) {
             micSess->Stop();
         }
         if (_micThread.joinable()) {
             _micThread.join();
         }
-        if (micPort > 0) {
-            UsbIpServer::DetachLocalPort(micPort);
+    }
+
+    // 2. Detach virtual Bluetooth radio port BEFORE tearing down RadioBridgeSession so
+    //    usbip2_ude cleanly surprise-removes the virtual BTHUSB stack while live HCI URBs are
+    //    still answered. Clearing `_virtualRadioUsbipPort` prevents duplicate detach in
+    //    `RunTakeoverCycle`.
+    {
+        int radioPort = 0;
+        {
+            std::lock_guard<std::mutex> lock{_stateMutex};
+            radioPort = _virtualRadioUsbipPort;
+            _virtualRadioUsbipPort = 0;
+        }
+        if (radioPort > 0) {
+            UsbIpServer::DetachLocalPort(radioPort, detachTimeoutMs);
+        }
+        std::shared_ptr<RadioBridgeSession> sess;
+        {
+            std::lock_guard<std::mutex> lock{_sessionMutex};
+            sess = _radioSession;
+        }
+        if (sess) {
+            sess->Stop();
         }
     }
 
@@ -211,7 +247,10 @@ void RadioEngine::Stop()
     _radio.Close();
     _pipeServer.Stop();
 
-    if (RegistryStore::GetUninstalling() || _restoreRequested.load()) {
+    // NEVER invoke PnP driver installation (`DiInstallDevice`) during Windows shutdown: kernel
+    // `PopShutdownSystem` synchronizes with the PnP subsystem and any driver install / query-remove
+    // started during shutdown risks a 300 s `DRIVER_POWER_STATE_FAILURE` (0x9F/0x4) BSOD.
+    if (!systemShutdown && (RegistryStore::GetUninstalling() || _restoreRequested.load())) {
         ServiceLog::Write(
             LogLevel::Info, "engine", "Restoring native Bluetooth driver during stop.");
         RadioDriverManager::RestoreAllBoundAdapters();
@@ -223,7 +262,41 @@ void RadioEngine::Stop()
 void RadioEngine::OnSystemSuspend()
 {
     _suspended.store(true);
-    ServiceLog::Write(LogLevel::Info, "engine", "System suspending: pausing virtual radio.");
+    _supervisorCv.notify_all();
+    _radioImportCv.notify_all();
+    ServiceLog::Write(
+        LogLevel::Info, "engine", "System suspending: detaching virtual USB/IP devices.");
+
+    // Detach virtual mic & virtual Bluetooth radio cleanly BEFORE returning from PBT_APMSUSPEND
+    // so usbip2_ude has zero attached virtual PDOs during system D0 -> D3 / S3 transition.
+    {
+        std::unique_ptr<MicBridgeSession> micSess;
+        int micPort = 0;
+        {
+            std::lock_guard<std::mutex> lock{_micMutex};
+            DetachVirtualMicLocked(micSess, micPort);
+        }
+        if (micPort > 0) {
+            UsbIpServer::DetachLocalPort(micPort, 2000u);
+        }
+        if (micSess) {
+            micSess->Stop();
+        }
+        if (_micThread.joinable()) {
+            _micThread.join();
+        }
+    }
+
+    int radioPort = 0;
+    {
+        std::lock_guard<std::mutex> lock{_stateMutex};
+        radioPort = _virtualRadioUsbipPort;
+        _virtualRadioUsbipPort = 0;
+    }
+    if (radioPort > 0) {
+        UsbIpServer::DetachLocalPort(radioPort, 2000u);
+    }
+
     std::shared_ptr<RadioBridgeSession> sess;
     {
         std::lock_guard<std::mutex> lock{_sessionMutex};
@@ -383,11 +456,27 @@ void RadioEngine::RunTakeoverCycle()
 
     // 1. Ensure physical adapter is bound to inbox WinUSB.
     if (!RadioDriverManager::IsOnWinUsb(adapter.instanceId)) {
+        if (!_running.load() || _suspended.load() || _systemShutdown.load()) {
+            return;
+        }
         SetState(
             Protocol::RadioServiceState::BindingWinUsb,
             "Switching physical Bluetooth adapter to inbox WinUSB driver.");
         bool needReboot = false;
-        if (!RadioDriverManager::BindWinUsb(adapter.instanceId, needReboot)) {
+        uint32_t bindErr = ERROR_SUCCESS;
+        if (!RadioDriverManager::BindWinUsb(adapter.instanceId, needReboot, &bindErr)) {
+            if (bindErr == RadioDriverManager::kErrorPnpQueryRemoveTimeout) {
+                // Never retry DiInstallDevice or call RestoreAllBoundAdapters on top of a
+                // query-remove timeout (Error 481): stacking more PnP install requests risks a
+                // kernel PnP deadlock and BSOD 0x9F (0x4) on shutdown.
+                _watchdog.TripGuardImmediately();
+                RegistryStore::SetGuardTripped(true);
+                ServiceLog::ReportEventLogError(
+                    "AirpodsBridgeService tripped safety guard immediately after PnP query-remove "
+                    "timeout (Error 481) during WinUSB bind. Restart Windows before retrying.");
+                BroadcastStatus();
+                return;
+            }
             const auto decision = _watchdog.RecordTakeoverFailure(SteadyNowMs());
             if (decision.action ==
                 Protocol::WatchdogPolicy::FailureAction::TripGuardAndRestoreNative)
@@ -396,14 +485,19 @@ void RadioEngine::RunTakeoverCycle()
                 ServiceLog::ReportEventLogError(
                     "AirpodsBridgeService tripped safety guard after 3 WinUSB bind failures; "
                     "restoring native Bluetooth driver.");
-                RadioDriverManager::RestoreAllBoundAdapters();
+                if (!_systemShutdown.load()) {
+                    RadioDriverManager::RestoreAllBoundAdapters();
+                }
                 BroadcastStatus();
                 return;
             }
-            Sleep(decision.backoffMs);
+            WaitInterruptible(decision.backoffMs);
             return;
         }
-        Sleep(400); // Allow WinUSB PnP interface to come online.
+        WaitInterruptible(400); // Allow WinUSB PnP interface to come online.
+        if (!_running.load() || _suspended.load() || _systemShutdown.load()) {
+            return;
+        }
     }
 
     {
@@ -414,12 +508,17 @@ void RadioEngine::RunTakeoverCycle()
     // 2. Open WinUSB device handle & read descriptors.
     const std::wstring devPath = RadioDriverManager::DevicePathForWinUsb(adapter.instanceId);
     bool opened = false;
-    for (int attempt = 0; attempt < 10 && _running.load(); ++attempt) {
+    for (int attempt = 0; attempt < 10 && _running.load() && !_suspended.load(); ++attempt) {
         if (_radio.Open(devPath)) {
             opened = true;
             break;
         }
-        Sleep(300);
+        WaitInterruptible(300);
+    }
+
+    if (!_running.load() || _suspended.load() || _systemShutdown.load()) {
+        _radio.Close();
+        return;
     }
 
     if (!opened || !_radio.HciPipes().Valid()) {
@@ -434,34 +533,45 @@ void RadioEngine::RunTakeoverCycle()
             ServiceLog::ReportEventLogError(
                 "AirpodsBridgeService tripped safety guard after WinUSB open failures; restoring "
                 "native Bluetooth driver.");
-            RadioDriverManager::RestoreAllBoundAdapters();
+            if (!_systemShutdown.load()) {
+                RadioDriverManager::RestoreAllBoundAdapters();
+            }
             BroadcastStatus();
             return;
         }
-        Sleep(decision.backoffMs);
+        WaitInterruptible(decision.backoffMs);
         return;
     }
 
     // 3. Clean up any stale virtual ports left over from an earlier session/crash, then export
     //    the physical radio over localhost USB/IP and attach cleanly via signed usbip-win2.
     UsbIpServer::DetachAllPortsForBusId(kRadioBusId);
+    if (!_running.load() || _suspended.load() || _systemShutdown.load()) {
+        _radio.Close();
+        return;
+    }
     _usbIp.SetBusIdBusy(kRadioBusId, false);
     _usbIp.ExportDevice(_radio.MakeExportedDevice(kRadioBusId));
     const auto portOpt = _usbIp.AttachLocalDevice(kRadioBusId);
     if (!portOpt.has_value()) {
         _usbIp.UnexportDevice(kRadioBusId);
         _radio.Close();
+        if (!_running.load() || _suspended.load() || _systemShutdown.load()) {
+            return;
+        }
         const auto decision = _watchdog.RecordTakeoverFailure(SteadyNowMs());
         if (decision.action == Protocol::WatchdogPolicy::FailureAction::TripGuardAndRestoreNative) {
             RegistryStore::SetGuardTripped(true);
             ServiceLog::ReportEventLogError(
                 "AirpodsBridgeService tripped safety guard after USB/IP attach failures; restoring "
                 "native Bluetooth driver.");
-            RadioDriverManager::RestoreAllBoundAdapters();
+            if (!_systemShutdown.load()) {
+                RadioDriverManager::RestoreAllBoundAdapters();
+            }
             BroadcastStatus();
             return;
         }
-        Sleep(decision.backoffMs);
+        WaitInterruptible(decision.backoffMs);
         return;
     }
 
@@ -476,15 +586,26 @@ void RadioEngine::RunTakeoverCycle()
     {
         std::unique_lock<std::mutex> lock{_sessionMutex};
         _radioImportCv.wait_for(lock, std::chrono::seconds(10), [&] {
-            return !_running.load() || _pendingRadioSocket.Valid();
+            return !_running.load() || _suspended.load() || _pendingRadioSocket.Valid();
         });
         importedSocket = std::move(_pendingRadioSocket);
     }
 
-    if (!importedSocket.Valid()) {
-        UsbIpServer::DetachLocalPort(attachedPort);
+    if (!importedSocket.Valid() || !_running.load() || _suspended.load()) {
+        int portToDetach = 0;
+        {
+            std::lock_guard<std::mutex> lock{_stateMutex};
+            portToDetach = _virtualRadioUsbipPort;
+            _virtualRadioUsbipPort = 0;
+        }
+        if (portToDetach > 0) {
+            UsbIpServer::DetachLocalPort(portToDetach, _systemShutdown.load() ? 3500u : 6000u);
+        }
         _usbIp.UnexportDevice(kRadioBusId);
         _radio.Close();
+        if (!_running.load() || _suspended.load() || _systemShutdown.load()) {
+            return;
+        }
         const auto decision = _watchdog.RecordTakeoverFailure(SteadyNowMs());
         if (decision.action == Protocol::WatchdogPolicy::FailureAction::TripGuardAndRestoreNative) {
             RegistryStore::SetGuardTripped(true);
@@ -492,7 +613,7 @@ void RadioEngine::RunTakeoverCycle()
             BroadcastStatus();
             return;
         }
-        Sleep(decision.backoffMs);
+        WaitInterruptible(decision.backoffMs);
         return;
     }
 
@@ -551,21 +672,33 @@ void RadioEngine::RunTakeoverCycle()
 
     _hci.Reset("radio bridge session ended");
     _usbIp.SetBusIdBusy(kRadioBusId, false);
-    if (!UsbIpServer::DetachLocalPort(attachedPort)) {
-        UsbIpServer::DetachAllPortsForBusId(kRadioBusId);
+
+    // Only run usbip detach here if Stop() / OnSystemSuspend() did not already detach it cleanly.
+    int remainingPort = 0;
+    {
+        std::lock_guard<std::mutex> lock{_stateMutex};
+        remainingPort = _virtualRadioUsbipPort;
+        _virtualRadioUsbipPort = 0;
+        _virtualRadioAttached = false;
+    }
+    if (remainingPort > 0) {
+        const DWORD timeoutMs = _systemShutdown.load() ? 3500u : 6000u;
+        if (!UsbIpServer::DetachLocalPort(remainingPort, timeoutMs)) {
+            UsbIpServer::DetachAllPortsForBusId(kRadioBusId, timeoutMs);
+        }
     }
     _usbIp.UnexportDevice(kRadioBusId);
     _radio.Close();
 
-    {
-        std::lock_guard<std::mutex> lock{_stateMutex};
-        _virtualRadioAttached = false;
-        _virtualRadioUsbipPort = 0;
+    // Never call CM_Uninstall_DevNode during Windows shutdown or sleep transitions: mutating the
+    // PnP tree during shutdown/suspend contends with PopShutdownSystem's PnP sync lock.
+    if (!_systemShutdown.load() && !_suspended.load()) {
+        RadioDriverManager::ForgetHiddenVirtualAudioNodes(adapter.instanceId);
     }
 
-    RadioDriverManager::ForgetHiddenVirtualAudioNodes(adapter.instanceId);
-
-    if (_running.load() && !_suspended.load() && !_restoreRequested.load()) {
+    if (_running.load() && !_suspended.load() && !_restoreRequested.load() &&
+        !_systemShutdown.load())
+    {
         const auto decision = _watchdog.RecordTakeoverFailure(SteadyNowMs());
         if (decision.action == Protocol::WatchdogPolicy::FailureAction::TripGuardAndRestoreNative) {
             RegistryStore::SetGuardTripped(true);
@@ -575,7 +708,7 @@ void RadioEngine::RunTakeoverCycle()
             BroadcastStatus();
             return;
         }
-        Sleep(decision.backoffMs);
+        WaitInterruptible(decision.backoffMs);
     }
 }
 
@@ -788,15 +921,15 @@ void RadioEngine::ReconcileVirtualMic()
         }
     }
 
+    if (oldPort > 0) {
+        UsbIpServer::DetachLocalPort(oldPort);
+        _usbIp.UnexportDevice(kMicBusId);
+    }
     if (oldSess) {
         oldSess->Stop();
     }
     if (_micThread.joinable() && oldSess) {
         _micThread.join();
-    }
-    if (oldPort > 0) {
-        UsbIpServer::DetachLocalPort(oldPort);
-        _usbIp.UnexportDevice(kMicBusId);
     }
 
     if (needAttach) {

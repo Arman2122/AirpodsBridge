@@ -47,6 +47,7 @@ public:
     bool AllowAdapterReset(int64_t nowMs);
 
     void ClearGuard();
+    void TripGuardImmediately();
     bool IsGuardTripped() const noexcept;
     uint32_t RecentFailureCount(int64_t nowMs) const;
     uint32_t RecentAdapterResetCount(int64_t nowMs) const;

@@ -9,6 +9,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Prevented `DRIVER_POWER_STATE_FAILURE` (`0x0000009F`, parameter 1 `0x4` / 300 s PnP sync
+  timeout) BSODs on Windows shutdown/restart caused by `BTH\MS_RFCOMM` deadlocking during live
+  driver swaps and virtual USB/IP device teardown (`Service/Win/RadioDriverManager.h/.cpp`,
+  `Service/Win/ServiceMain.cpp`, `Service/Win/RadioEngine.h/.cpp`, `Service/Win/NativeSetup.cpp`,
+  `Service/Win/UsbIpServer.h/.cpp`, `Service/Win/RadioBridgeSession.cpp`,
+  `Service/Protocol/WatchdogPolicy.h/.cpp`):
+  - Quiesces Windows Bluetooth user-mode services (`BTAGService`, `BthAvctpSvc`,
+    `BluetoothUserService_*`, and `bthserv`) before `DiInstallDevice` switches a native Bluetooth
+    adapter to WinUSB so no open RFCOMM/HFP handles can wedge `BTH\MS_RFCOMM` in
+    `IRP_MN_QUERY_REMOVE_DEVICE` (Win32 Error `481`), then restarts the paused services cleanly.
+  - Serialized all `DiInstallDevice` operations across processes via
+    `Global\AirpodsBridgeDriverSwapMutex`, tripped the safety guard immediately on Error `481`
+    without stacking retry installs, and fixed `NativeSetup` to verify service stop and restore
+    results before proceeding.
+  - Upgraded `AirpodsBridgeService` to accept `SERVICE_ACCEPT_PRESHUTDOWN` (15 s preshutdown
+    timeout + `dwCheckPoint` heartbeat), detach virtual `usbip2_ude` radio and mic ports *before*
+    closing their TCP sessions on both shutdown and system suspend, close the WinUSB handle
+    promptly with interruptible supervisor waits, and forbid all PnP driver install/uninstall calls
+    (`DiInstallDevice`, `CM_Uninstall_DevNode`) during Windows shutdown.
 - Fixed optical Heart Rate monitoring requiring a manual off/on toggle on startup when AirPods
   Pro 3 report `HRM_STATE` (`0x30`) enabled by default (`Source/Core/AirPods.h/.cpp`):
   - `Core::AirPods::Manager` now adopts an incoming hardware `HeartRateMonitoring = true`

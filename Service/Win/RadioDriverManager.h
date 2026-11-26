@@ -52,11 +52,18 @@ public:
     static std::wstring DevicePathForWinUsb(const std::wstring &instanceId);
     static std::string DescribeDeviceState(const std::wstring &instanceId);
 
+    // Win32 481 (ERROR_PNP_QUERY_REMOVE_DEVICE_TIMEOUT): indicates a driver hung in
+    // IRP_MN_QUERY_REMOVE_DEVICE (e.g. BTH\MS_RFCOMM). Callers must NEVER retry DiInstallDevice
+    // on top of a wedged devnode or they risk poisoning kernel PnP until shutdown (BSOD 0x9F/0x4).
+    static constexpr uint32_t kErrorPnpQueryRemoveTimeout = 481u;
+
     // Switches the adapter to inbox WinUSB; returns true on success (sets `rebootRequired`).
-    static bool BindWinUsb(const std::wstring &instanceId, bool &rebootRequired);
+    static bool BindWinUsb(
+        const std::wstring &instanceId, bool &rebootRequired, uint32_t *win32ErrorOut = nullptr);
 
     // Restores the best-ranked native vendor driver; returns true on success.
-    static bool RestoreNative(const std::wstring &instanceId, bool &rebootRequired);
+    static bool RestoreNative(
+        const std::wstring &instanceId, bool &rebootRequired, uint32_t *win32ErrorOut = nullptr);
 
     // Re-plugs the USB hub port (IOCTL_USB_HUB_CYCLE_PORT) so a newly installed driver starts
     // immediately even if a process held an open handle.
@@ -66,8 +73,9 @@ public:
     // on next plug-in.
     static bool MarkForReinstall(const std::wstring &instanceId);
 
-    // Restores every adapter instance ever bound to WinUSB by this service.
-    static void RestoreAllBoundAdapters();
+    // Restores every adapter instance ever bound to WinUSB by this service. Returns true only
+    // when every present bound adapter was restored (or already native).
+    static bool RestoreAllBoundAdapters();
 
     // Cleans up phantom Bluetooth audio devnodes on virtual adapter instances so Windows does
     // not number endpoints ("2- AirPods Pro"), while preserving pairings, HID, and LE nodes.
