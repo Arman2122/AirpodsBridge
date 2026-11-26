@@ -159,7 +159,6 @@ int main(int argc, char *argv[])
         aapState.noiseControl.heartRateBpm = 72;
         aapState.noiseControl.heartRateConfidence = 0xE6;
         aapState.noiseControl.heartRateHistory = {66, 68, 71, 74, 72, 70, 75, 79, 76, 73, 72};
-        aapState.estimatedMinutesRemaining = 220;
         window.UpdateState(aapState);
         if (!Grab(window, output, "AirPods Pro 3 ANC", look.suffix)) {
             return 1;

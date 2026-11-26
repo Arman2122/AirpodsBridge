@@ -3,8 +3,6 @@
 
 #include "Source/Presentation/MainWindowPresentation.h"
 
-#include "Source/Domain/BatteryTracker.h"
-
 namespace Gui {
 namespace {
 
@@ -207,11 +205,6 @@ MainWindowPresentation MainWindowViewModel::Present() const
     }
     else if (_state->asymmetricBatteryWarning) {
         result.statusBadge = QStringLiteral("Uneven charge \u2014 check case pins");
-    }
-    else if (_state->estimatedMinutesRemaining.has_value()) {
-        result.statusBadge =
-            QStringLiteral("%1 left").arg(Core::AirPods::BatteryTracker::FormatDuration(
-                _state->estimatedMinutesRemaining.value()));
     }
 
     const auto caps = Core::AirPods::CapabilitiesFor(_state->model);

@@ -723,6 +723,7 @@ void AirPodsDomainTests::PresentsMainWindowConnectAndNoiseControl()
     state.model = Model::AirPods_Pro_3;
     state.pods.left.battery = 80;
     state.pods.right.battery = 75;
+    state.estimatedMinutesRemaining = 158;
     viewModel.UpdateState(state);
     presentation = viewModel.Present();
     QCOMPARE(presentation.buttonAction, Gui::ButtonAction::NoButton);

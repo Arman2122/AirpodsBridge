@@ -7,6 +7,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the battery time-remaining estimate subtitle (`~Xh Ym left`) from the popup header for a
+  cleaner layout (`Source/Presentation/MainWindowPresentation.cpp`).
+
 ### Fixed
 
 - Prevented `DRIVER_POWER_STATE_FAILURE` (`0x0000009F`, parameter 1 `0x4` / 300 s PnP sync
