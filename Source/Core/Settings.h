@@ -101,7 +101,7 @@ void SetRepository(std::unique_ptr<Repository> repository);
     callback(bool, native_toast_notifications, {true},                                             \
         Impl::Desc{QObject::tr("Uses Windows toast notifications when installed. Portable mode always uses tray alerts.")}) \
     callback(bool, radio_service_low_latency_qos, {true},                                          \
-        Impl::Desc{QObject::tr("Upgrades AirPods ACL links to Guaranteed 3.75 ms QoS, clamps Sniff sleep intervals, and caps retransmit flush timeout to 40 ms via the Radio Service.")}) \
+        Impl::Desc{QObject::tr("Tightens AirPods Bluetooth ACL polling from 25 ms to 3.75 ms via the No-Test-Mode Radio Service for snappier controls and lower audio jitter.")}) \
     callback(bool, radio_service_hfp_decline, {false},                                             \
         Impl::Desc{QObject::tr("Declines AirPods Hands-Free RFCOMM links at the Bluetooth HCI layer so games and calls never drop stereo playback into muffled mono.")}) \
     callback(bool, radio_service_virtual_mic, {false},                                             \

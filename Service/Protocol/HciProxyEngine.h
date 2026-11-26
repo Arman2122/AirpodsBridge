@@ -29,9 +29,9 @@ namespace Service::Protocol {
 //   - Maintains exact HCI ACL controller credit accounting and subtracts injected packet
 //     completions from `Number_Of_Completed_Packets` (0x13) so Windows' credit pool never
 //     drifts.
-//   - Rewrites `HCI_QoS_Setup` (0x0807, Guaranteed + low latency & delay variation), clamps
-//     `HCI_Sniff_Mode` (0x0803) sleep intervals, and caps `HCI_Write_Automatic_Flush_Timeout`
-//     (0x0C28) to 40 ms on tracked AirPods links when low-latency QoS is enabled.
+//   - Rewrites `HCI_QoS_Setup` (0x0807) poll latency on tracked AirPods links when low-latency
+//     QoS is enabled (default 3750 us instead of Windows' 25000 us, preserving spec-valid
+//     Service_Type and Delay_Variation so Intel/AirPods LMP QoS negotiation never fails).
 //   - Supports pull-mode ACL injection so a single Bulk OUT owner pops injected packets right
 //     before writing to WinUSB, making Windows L2CAP fragment interleaving impossible.
 //   - Snoops AVDTP (PSM 0x0019) and optionally declines AirPods RFCOMM HFP (PSM 0x0003)

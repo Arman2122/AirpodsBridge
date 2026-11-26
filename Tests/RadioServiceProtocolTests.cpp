@@ -646,7 +646,8 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
             0x03, 0x0B, 0x00, 0x0D, 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x01, 0x00},
         out);
 
-    // 1. HCI_QoS_Setup (0x0807): upgrades AirPods to Guaranteed (0x02) + 3750 us latency & jitter.
+    // 1. HCI_QoS_Setup (0x0807): tightens AirPods poll latency to 3750 us while preserving
+    //    spec-valid Service_Type and Delay_Variation so Intel/AirPods LMP QoS stays rock-solid.
     auto makeQos = [](uint16_t handle) {
         std::vector<uint8_t> cmd(23, 0);
         cmd[0] = 0x07;
@@ -657,96 +658,24 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
         cmd[6] = 0x01;  // Best Effort
         cmd[15] = 0xA8; // 25000 = 0x000061A8
         cmd[16] = 0x61;
-        cmd[19] = 0xA8;
-        cmd[20] = 0x61;
+        cmd[19] = 0xFF; // 0xFFFFFFFF don't-care Delay_Variation
+        cmd[20] = 0xFF;
+        cmd[21] = 0xFF;
+        cmd[22] = 0xFF;
         return cmd;
     };
 
     auto qosAirPods = makeQos(kAirPodsHandle);
     QVERIFY(engine.ProcessWindowsCommand(qosAirPods));
-    QCOMPARE(qosAirPods[6], uint8_t{0x02}); // Guaranteed real-time QoS
+    QCOMPARE(qosAirPods[6], uint8_t{0x01});
     QCOMPARE(ReadLe32(qosAirPods, 15), 3750u);
-    QCOMPARE(ReadLe32(qosAirPods, 19), 3750u);
+    QCOMPARE(ReadLe32(qosAirPods, 19), 0xFFFFFFFFu);
 
     auto qosMouse = makeQos(kMouseHandle);
     QVERIFY(engine.ProcessWindowsCommand(qosMouse));
     QCOMPARE(qosMouse[6], uint8_t{0x01});
     QCOMPARE(ReadLe32(qosMouse, 15), 25000u); // Mouse untouched!
-    QCOMPARE(ReadLe32(qosMouse, 19), 25000u);
-
-    // 2. HCI_Sniff_Mode (0x0803): clamps 500 ms Windows sleep to 10 ms idle / 5 ms streaming.
-    auto makeSniff = [](uint16_t handle, uint16_t maxSlots, uint16_t minSlots) {
-        std::vector<uint8_t> cmd(13, 0);
-        cmd[0] = 0x03;
-        cmd[1] = 0x08;
-        cmd[2] = 10;
-        cmd[3] = static_cast<uint8_t>(handle & 0xFFu);
-        cmd[4] = static_cast<uint8_t>((handle >> 8) & 0xFFu);
-        cmd[5] = static_cast<uint8_t>(maxSlots & 0xFFu);
-        cmd[6] = static_cast<uint8_t>((maxSlots >> 8) & 0xFFu);
-        cmd[7] = static_cast<uint8_t>(minSlots & 0xFFu);
-        cmd[8] = static_cast<uint8_t>((minSlots >> 8) & 0xFFu);
-        cmd[9] = 1;  // attempt
-        cmd[11] = 1; // timeout
-        return cmd;
-    };
-
-    auto sniffAirPodsIdle = makeSniff(kAirPodsHandle, 0x0320, 0x0190); // 500 ms / 250 ms
-    QVERIFY(engine.ProcessWindowsCommand(sniffAirPodsIdle));
-    QCOMPARE(ReadLe16(sniffAirPodsIdle, 5), uint16_t{0x0010}); // Clamped to 10.0 ms idle
-    QCOMPARE(ReadLe16(sniffAirPodsIdle, 7), uint16_t{0x0010});
-    QCOMPARE(ReadLe16(sniffAirPodsIdle, 9), uint16_t{4});
-    QCOMPARE(ReadLe16(sniffAirPodsIdle, 11), uint16_t{4});
-
-    // Bring up AVDTP signaling and send AVDTP_START -> Sniff clamps even tighter to 5.0 ms!
-    std::vector<uint8_t> fwdOut;
-    engine.ProcessWindowsAclOut(
-        MakeL2capPkt(kAirPodsHandle, 0x0001, {0x02, 0x01, 0x04, 0x00, 0x19, 0x00, 0x41, 0x00}),
-        fwdOut);
-    std::vector<uint8_t> winAclTmp;
-    engine.ProcessControllerAclIn(
-        MakeL2capPkt(
-            kAirPodsHandle, 0x0001,
-            {0x03, 0x01, 0x08, 0x00, 0x51, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00}),
-        winAclTmp);
-    engine.ProcessWindowsAclOut(MakeL2capPkt(kAirPodsHandle, 0x0051, {0x10, 0x07}), fwdOut);
-
-    auto sniffAirPodsStream = makeSniff(kAirPodsHandle, 0x0100, 0x0080);
-    QVERIFY(engine.ProcessWindowsCommand(sniffAirPodsStream));
-    QCOMPARE(ReadLe16(sniffAirPodsStream, 5), uint16_t{0x0008}); // Clamped to 5.0 ms streaming!
-
-    auto sniffMouse = makeSniff(kMouseHandle, 0x0320, 0x0190);
-    QVERIFY(engine.ProcessWindowsCommand(sniffMouse));
-    QCOMPARE(ReadLe16(sniffMouse, 5), uint16_t{0x0320}); // Mouse untouched!
-
-    // 3. HCI_Write_Automatic_Flush_Timeout (0x0C28): caps infinite (0) and > 64 down to 64 (40 ms).
-    auto makeFlush = [](uint16_t handle, uint16_t flushSlots) {
-        std::vector<uint8_t> cmd(7, 0);
-        cmd[0] = 0x28;
-        cmd[1] = 0x0C;
-        cmd[2] = 4;
-        cmd[3] = static_cast<uint8_t>(handle & 0xFFu);
-        cmd[4] = static_cast<uint8_t>((handle >> 8) & 0xFFu);
-        cmd[5] = static_cast<uint8_t>(flushSlots & 0xFFu);
-        cmd[6] = static_cast<uint8_t>((flushSlots >> 8) & 0xFFu);
-        return cmd;
-    };
-
-    auto flushInf = makeFlush(kAirPodsHandle, 0);
-    QVERIFY(engine.ProcessWindowsCommand(flushInf));
-    QCOMPARE(ReadLe16(flushInf, 5), uint16_t{64});
-
-    auto flushHuge = makeFlush(kAirPodsHandle, 200);
-    QVERIFY(engine.ProcessWindowsCommand(flushHuge));
-    QCOMPARE(ReadLe16(flushHuge, 5), uint16_t{64});
-
-    auto flushTight = makeFlush(kAirPodsHandle, 32);
-    QVERIFY(engine.ProcessWindowsCommand(flushTight));
-    QCOMPARE(ReadLe16(flushTight, 5), uint16_t{32}); // Already tighter -> preserved!
-
-    auto flushMouse = makeFlush(kMouseHandle, 0);
-    QVERIFY(engine.ProcessWindowsCommand(flushMouse));
-    QCOMPARE(ReadLe16(flushMouse, 5), uint16_t{0}); // Mouse untouched!
+    QCOMPARE(ReadLe32(qosMouse, 19), 0xFFFFFFFFu);
 
     // Peer-initiated RFCOMM ConnReq (PSM 0x0003) is declined for AirPods, forwarded for Mouse.
     const std::vector<uint8_t> rfcommConnReq = {0x02, 0x05, 0x04, 0x00, 0x03, 0x00, 0x41, 0x00};

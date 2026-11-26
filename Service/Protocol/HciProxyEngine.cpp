@@ -11,20 +11,11 @@ namespace Service::Protocol {
 namespace {
 
 // HCI Command opcodes.
-constexpr uint16_t kCmdSniffMode = 0x0803;
 constexpr uint16_t kCmdQosSetup = 0x0807;
 constexpr uint16_t kCmdReset = 0x0C03;
-constexpr uint16_t kCmdWriteAutoFlushTimeout = 0x0C28;
 constexpr uint16_t kCmdReadLocalVersion = 0x1001;
 constexpr uint16_t kCmdReadBufferSize = 0x1005;
 constexpr uint16_t kCmdReadBdAddr = 0x1009;
-
-// Real-time A2DP Automatic Flush Timeout cap (64 baseband slots * 0.625 ms = 40.0 ms, matching
-// Apple CoreAudio's real-time audio flush limit so RF bursts cannot queue 200+ ms of stale lag).
-constexpr uint16_t kLowLatencyMaxFlushSlots = 64;
-constexpr uint16_t kMinValidSniffSlots = 0x0006;     // 3.75 ms (Bluetooth Core Spec minimum)
-constexpr uint16_t kStreamingMaxSniffSlots = 0x0008; // 5.0 ms while AVDTP is streaming
-constexpr uint16_t kIdleMaxSniffSlots = 0x0010;      // 10.0 ms while AirPods ACL is idle
 
 // HCI Event codes.
 constexpr uint8_t kEvtConnectionComplete = 0x03;
@@ -255,7 +246,7 @@ void HciProxyEngine::Tick(uint64_t nowMs)
             }
             if (link.encrypted && link.aap.state == AapState::WaitingForLink) {
                 if (link.avdtp.signalOpen ||
-                    (nowMs >= link.aap.stateEnteredMs && nowMs - link.aap.stateEnteredMs >= 1200u))
+                    (nowMs >= link.aap.stateEnteredMs && nowMs - link.aap.stateEnteredMs >= 3500u))
                 {
                     BeginAapConnectLocked(link, deferred);
                 }
@@ -266,19 +257,28 @@ void HciProxyEngine::Tick(uint64_t nowMs)
                 nowMs >= link.aap.stateEnteredMs && nowMs - link.aap.stateEnteredMs >= 3000u)
             {
                 const uint8_t retries = link.aap.retryCount;
+                const uint8_t maxRetries = link.avdtp.signalOpen ? 3u : 1u;
                 deferred.logs.emplace_back(
                     LogLevel::Warn, "Hidden L2CAP AAP handshake stalled (state=" +
                                         std::to_string(static_cast<int>(link.aap.state)) +
                                         ", scid=" + std::to_string(link.aap.localCid) +
+                                        ", avdtp=" + (link.avdtp.signalOpen ? "1" : "0") +
                                         ", outstanding=" + std::to_string(_totalOurOutstanding) +
                                         ", winPduRem=" + std::to_string(link.windowsPduRemaining) +
                                         ", attempt=" + std::to_string(retries + 1) + ").");
-                if (retries < 3 && _totalOurOutstanding < kMaxOurOutstandingPerController) {
+                if (retries < maxRetries && _totalOurOutstanding < kMaxOurOutstandingPerController)
+                {
                     link.aap.retryCount = static_cast<uint8_t>(retries + 1);
                     BeginAapConnectLocked(link, deferred);
                 }
-                else if (retries >= 3) {
+                else if (retries >= maxRetries) {
                     link.aap = AapChannel{};
+                    // If AVDTP is not up yet, return to WaitingForLink so AAP opens immediately
+                    // the moment AVDTP comes online instead of giving up permanently.
+                    if (!link.avdtp.signalOpen) {
+                        link.aap.state = AapState::WaitingForLink;
+                        link.aap.stateEnteredMs = nowMs + 60000u;
+                    }
                     deferred.aapStates.emplace_back(link.btAddress, false, 0xFFFFu);
                 }
                 else {
@@ -420,64 +420,17 @@ bool HciProxyEngine::ProcessWindowsCommand(std::vector<uint8_t> &command)
         return true;
     }
 
-    // 1. HCI_QoS_Setup (0x0807): upgrade tracked AirPods ACL links to Guaranteed real-time QoS
-    //    (Service_Type = 0x02) and tighten both Latency and Delay_Variation from Windows' 25 ms
-    //    default down to our configured low-latency poll target (3.75 ms).
+    // Rewrite Windows' default 25 ms ACL poll latency down to our configured low-latency target
+    // (3.75 ms) on tracked AirPods links while preserving Windows' spec-valid `Service_Type`
+    // (`0x01` Best Effort) and `Delay_Variation` (`0xFFFFFFFF`) so Intel/AirPods LMP QoS
+    // negotiation stays 100% compliant and never triggers link errors.
     if (opcode == kCmdQosSetup && command.size() >= 23) {
         const uint16_t handle = static_cast<uint16_t>(ReadLe16(command, 3) & 0x0FFFu);
         if (const auto it = _aclLinks.find(handle);
             it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
         {
-            command[6] = 0x02; // Guaranteed real-time baseband service
             WriteLe32(command, 15, _config.pollLatencyUs);
-            WriteLe32(command, 19, _config.pollLatencyUs);
             ++_rewrittenQosCommands;
-        }
-    }
-    // 2. HCI_Sniff_Mode (0x0803): prevent Windows from parking the AirPods ACL link in 100-500 ms
-    //    power-saving Sniff intervals by clamping to 5 ms while streaming / 10 ms while idle.
-    else if (opcode == kCmdSniffMode && command.size() >= 13) {
-        const uint16_t handle = static_cast<uint16_t>(ReadLe16(command, 3) & 0x0FFFu);
-        if (const auto it = _aclLinks.find(handle);
-            it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
-        {
-            const uint16_t capMax =
-                it->second.avdtp.streaming ? kStreamingMaxSniffSlots : kIdleMaxSniffSlots;
-            const uint16_t origMax = ReadLe16(command, 5);
-            const uint16_t origMin = ReadLe16(command, 7);
-            const uint16_t origAttempt = ReadLe16(command, 9);
-            const uint16_t origTimeout = ReadLe16(command, 11);
-
-            const uint16_t newMax = std::clamp<uint16_t>(
-                origMax == 0 ? capMax : std::min(origMax, capMax), kMinValidSniffSlots, capMax);
-            const uint16_t newMin = std::clamp<uint16_t>(origMin, kMinValidSniffSlots, newMax);
-            const uint16_t newAttempt = std::max<uint16_t>(origAttempt, 4u);
-            const uint16_t newTimeout = std::max<uint16_t>(origTimeout, 4u);
-
-            if (newMax != origMax || newMin != origMin || newAttempt != origAttempt ||
-                newTimeout != origTimeout)
-            {
-                WriteLe16(command, 5, newMax);
-                WriteLe16(command, 7, newMin);
-                WriteLe16(command, 9, newAttempt);
-                WriteLe16(command, 11, newTimeout);
-                ++_rewrittenQosCommands;
-            }
-        }
-    }
-    // 3. HCI_Write_Automatic_Flush_Timeout (0x0C28): Windows defaults to 0 (infinite retries),
-    //    which queues 150-300 ms of stale A2DP audio during RF interference. Cap to 40 ms
-    //    (64 slots), matching Apple CoreAudio's real-time A2DP flush timeout.
-    else if (opcode == kCmdWriteAutoFlushTimeout && command.size() >= 7) {
-        const uint16_t handle = static_cast<uint16_t>(ReadLe16(command, 3) & 0x0FFFu);
-        if (const auto it = _aclLinks.find(handle);
-            it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
-        {
-            const uint16_t flushSlots = ReadLe16(command, 5);
-            if (flushSlots == 0 || flushSlots > kLowLatencyMaxFlushSlots) {
-                WriteLe16(command, 5, kLowLatencyMaxFlushSlots);
-                ++_rewrittenQosCommands;
-            }
         }
     }
     return true;

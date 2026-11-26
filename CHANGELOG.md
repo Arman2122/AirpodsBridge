@@ -9,23 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Ultra-Low-Latency Audio Engine (`3.0 ms` `IAudioClient3` + HCI Link-Layer Tuning)**
-  (`Source/Core/AudioControl_win.cpp`, `Service/Protocol/HciProxyEngine.cpp`,
-  `Source/Gui/SettingsWindow.cpp`):
+- **Ultra-Low-Latency Audio Engine (`3.0 ms` `IAudioClient3` + `IPolicyConfig` APO Bypass)**
+  (`Source/Core/AudioControl_win.cpp`, `Source/Gui/SettingsWindow.cpp`):
   - Upgraded the wear-aware WASAPI stream in `AudioControl` to
     `IAudioClient3::InitializeSharedAudioStream` at the endpoint's minimum hardware period
     (`3.0 ms` on AirPods instead of Windows' `10.0 ms` default, with clean legacy fallback),
     dropping Windows' shared-mode audio mixing latency system-wide for every game and app while
     AirPods are worn.
-  - Expanded the No-Test-Mode Radio Proxy Service HCI tuning on tracked AirPods links to
-    upgrade `HCI_QoS_Setup` (`0x0807`) to **Guaranteed** real-time service (`0x02`) with
-    `3.75 ms` latency & delay variation, clamp `HCI_Sniff_Mode` (`0x0803`) sleep intervals to
-    `5 ms` while streaming / `10 ms` while idle, and cap `HCI_Write_Automatic_Flush_Timeout`
-    (`0x0C28`) to `40 ms` (`64` baseband slots, matching Apple CoreAudio's real-time A2DP flush
-    limit) — while leaving non-AirPods peripherals untouched.
-  - Added USB Bluetooth Selective Suspend registry keys (`SelectiveSuspendEnabled`,
-    `EnhancedPowerManagementEnabled`, `AllowIdleIrpInD3`) alongside native COM WMI power
-    policy updates inside the zero-PowerShell native latency switcher.
+  - Added live `IPolicyConfig::SetPropertyValue` (`PKEY_AudioEndpoint_Disable_SysFx`) APO
+    bypass alongside native 64-bit registry writes, native COM WMI power policy, and USB
+    Bluetooth Selective Suspend registry keys inside the zero-PowerShell native latency
+    switcher.
 - **Dedicated Health Settings Page & Compact Popup Heart Rate Pill Bar**
   (`Source/Gui/SettingsWindow.cpp`, `Source/Gui/Widget/HeartRateCard.h/.cpp`,
   `Source/Gui/MainWindow.cpp`, `Source/Presentation/MainWindowPresentation.h/.cpp`):
@@ -224,6 +218,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed phantom `DEVICE_STATE_NOTPRESENT` endpoints from earlier Bluetooth bus instances
+  breaking AirPods audio routing and causing 8-second reconnect drops (`Source/Core/AudioControl_win.cpp`,
+  `Source/Core/QuickConnect_win.cpp`, `Service/Protocol/HciProxyEngine.cpp`):
+  - `AudioControl::RebindTrackedEndpoints` now enumerates only live endpoints (`ACTIVE` /
+    `UNPLUGGED`) with strict state ranking (`ACTIVE > UNPLUGGED`) so dead phantom endpoints can
+    never overwrite `_stereoActive` or silence playback/3 ms keep-alive after a radio restart.
+  - `QuickConnect` now filters out `NOTPRESENT` phantom endpoints and strictly prioritizes the
+    live **A2DP Stereo (`Headphones`)** endpoint on reconnect without poking `Hands-Free`
+    (`BTAGService`) concurrently, eliminating HFP-only `avdtp=0` 8-second `reason=22` drops.
+  - Kept `HCI_QoS_Setup` (`0x0807`) 100% Bluetooth Core Spec compliant (tightening poll latency
+    to `3.75 ms` while preserving `Service_Type` and `Delay_Variation`) and deferred
+    non-AVDTP AAP fallback to `3.5 s` with single-retry ceiling so hidden AAP never collides
+    with Windows' initial A2DP setup.
 - Fixed HCI ACL fragment-interleaving race condition in `AirpodsBridgeService`
   (`Service/Protocol/HciProxyEngine.cpp`, `Service/Win/RadioBridgeSession.cpp`) that could
   inject hidden AAP packets between fragments of a Windows A2DP audio frame (causing audio

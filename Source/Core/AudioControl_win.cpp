@@ -503,6 +503,20 @@ QString ResolveProcessName(DWORD pid)
     return result;
 }
 
+int EndpointStateRank(DWORD state)
+{
+    if (state == DEVICE_STATE_ACTIVE) {
+        return 4;
+    }
+    if (state == DEVICE_STATE_UNPLUGGED) {
+        return 3;
+    }
+    if (state == DEVICE_STATE_DISABLED) {
+        return 2;
+    }
+    return 1; // DEVICE_STATE_NOTPRESENT
+}
+
 bool LooksLikeHandsFree(const QString &friendlyName, const QString &ifaceDesc)
 {
     return friendlyName.contains(QStringLiteral("Hands-Free"), Qt::CaseInsensitive) ||
@@ -1729,10 +1743,15 @@ private:
             return;
         }
 
+        int bestStereoRank = 0;
+        int bestHfpRenderRank = 0;
+        int bestHfpCaptureRank = 0;
+
         const auto inspectFlow = [&](EDataFlow flow) {
             Support::OS::Windows::Com::UniquePtr<IMMDeviceCollection> collection;
             if (FAILED(_enumerator->EnumAudioEndpoints(
-                    flow, DEVICE_STATEMASK_ALL, collection.ReleaseAndAddressOf())) ||
+                    flow, DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED,
+                    collection.ReleaseAndAddressOf())) ||
                 !collection)
             {
                 return;
@@ -1772,6 +1791,7 @@ private:
                 DWORD state = 0;
                 dev->GetState(&state);
                 const bool active = state == DEVICE_STATE_ACTIVE;
+                const int rank = EndpointStateRank(state);
 
                 const QString friendly =
                     ReadStringProp(store.operator->(), PKEY_Device_FriendlyName);
@@ -1779,18 +1799,25 @@ private:
                     ReadStringProp(store.operator->(), PKEY_DeviceInterface_FriendlyName);
 
                 if (flow == eCapture) {
-                    _airPodsHfpCaptureId = endpointId;
+                    if (rank > bestHfpCaptureRank) {
+                        bestHfpCaptureRank = rank;
+                        _airPodsHfpCaptureId = endpointId;
+                    }
                     if (active) {
                         AttachSessionManager(dev.operator->());
                     }
                 }
                 else if (LooksLikeHandsFree(friendly, iface)) {
-                    _airPodsHfpRenderId = endpointId;
+                    if (rank > bestHfpRenderRank) {
+                        bestHfpRenderRank = rank;
+                        _airPodsHfpRenderId = endpointId;
+                    }
                     if (active) {
                         AttachSessionManager(dev.operator->());
                     }
                 }
-                else {
+                else if (rank > bestStereoRank) {
+                    bestStereoRank = rank;
                     _airPodsStereoRenderId = endpointId;
                     _stereoActive = active;
                 }

@@ -12,6 +12,7 @@
 #include <winrt/Windows.Devices.Enumeration.h>
 #include <winrt/Windows.Foundation.Collections.h>
 
+#include <algorithm>
 #include <map>
 #include <set>
 
@@ -29,7 +30,15 @@ struct EndpointInfo {
     QString containerId;
     DWORD state{};
     bool isRender{false};
+    bool isHandsFree{false};
 };
+
+bool LooksLikeHandsFreeEndpoint(const QString &friendlyName, const QString &ifaceDesc)
+{
+    return friendlyName.contains(QStringLiteral("Hands-Free"), Qt::CaseInsensitive) ||
+           ifaceDesc.contains(QStringLiteral("Hands-Free"), Qt::CaseInsensitive) ||
+           friendlyName.startsWith(QStringLiteral("Headset"), Qt::CaseInsensitive);
+}
 
 class ScopedComApartment final
 {
@@ -160,7 +169,12 @@ Support::OS::Windows::Com::UniquePtr<IMMDeviceEnumerator> CreateDeviceEnumerator
     return enumerator;
 }
 
-std::optional<QString> GetEndpointContainerId(IMMDevice &endpoint)
+struct EndpointProps {
+    QString containerId;
+    bool isHandsFree{false};
+};
+
+std::optional<EndpointProps> GetEndpointProps(IMMDevice &endpoint)
 {
     Support::OS::Windows::Com::UniquePtr<IPropertyStore> propertyStore;
     HRESULT result = endpoint.OpenPropertyStore(STGM_READ, propertyStore.ReleaseAndAddressOf());
@@ -183,7 +197,29 @@ std::optional<QString> GetEndpointContainerId(IMMDevice &endpoint)
     if (containerId.isEmpty()) {
         return std::nullopt;
     }
-    return containerId;
+
+    auto readStr = [&](const PROPERTYKEY &key) {
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        QString out;
+        if (SUCCEEDED(propertyStore->GetValue(key, &v))) {
+            if (v.vt == VT_LPWSTR && v.pwszVal != nullptr) {
+                out = QString::fromWCharArray(v.pwszVal);
+            }
+            else if (v.vt == VT_BSTR && v.bstrVal != nullptr) {
+                out = QString::fromWCharArray(v.bstrVal);
+            }
+        }
+        PropVariantClear(&v);
+        return out;
+    };
+
+    const QString friendly = readStr(PKEY_Device_FriendlyName);
+    const QString ifaceDesc = readStr(PKEY_DeviceInterface_FriendlyName);
+    return EndpointProps{
+        .containerId = containerId,
+        .isHandsFree = LooksLikeHandsFreeEndpoint(friendly, ifaceDesc),
+    };
 }
 
 std::vector<EndpointInfo> EnumerateAudioEndpoints(std::stop_token stopToken)
@@ -202,8 +238,10 @@ std::vector<EndpointInfo> EnumerateAudioEndpoints(std::stop_token stopToken)
 
     const auto collectFlow = [&](EDataFlow flow) {
         Support::OS::Windows::Com::UniquePtr<IMMDeviceCollection> collection;
+        // Enumerate only live present endpoints (ACTIVE or UNPLUGGED); stale NOTPRESENT
+        // phantom endpoints left over from earlier Bluetooth bus instances cannot reconnect.
         HRESULT result = enumerator->EnumAudioEndpoints(
-            flow, DEVICE_STATEMASK_ALL, collection.ReleaseAndAddressOf());
+            flow, DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED, collection.ReleaseAndAddressOf());
         if (FAILED(result) || !collection) {
             LOG(Warn, "EnumAudioEndpoints failed. HRESULT: {:#x}", result);
             return;
@@ -238,8 +276,8 @@ std::vector<EndpointInfo> EnumerateAudioEndpoints(std::stop_token stopToken)
             const QString endpointId = QString::fromWCharArray(rawEndpointId);
             CoTaskMemFree(rawEndpointId);
 
-            auto containerId = GetEndpointContainerId(*endpoint.operator->());
-            if (!containerId.has_value()) {
+            auto props = GetEndpointProps(*endpoint.operator->());
+            if (!props.has_value()) {
                 continue;
             }
 
@@ -250,7 +288,8 @@ std::vector<EndpointInfo> EnumerateAudioEndpoints(std::stop_token stopToken)
                 continue;
             }
 
-            endpoints.push_back({endpointId, containerId.value(), state, flow == eRender});
+            endpoints.push_back(
+                {endpointId, props->containerId, state, flow == eRender, props->isHandsFree});
         }
     };
 
@@ -578,27 +617,47 @@ bool WindowsBackend::SendContainerProperty(
     auto observation = std::make_shared<Observation>();
     observation->containerId = CanonicalContainerId(id);
 
+    std::vector<EndpointInfo> matching;
     const auto endpoints = EnumerateAudioEndpoints(stopToken);
     for (const auto &endpoint : endpoints) {
         if (NormalizeContainerId(endpoint.containerId) != selectedContainerKey) {
             continue;
         }
         observation->endpointIds.insert(endpoint.id);
+        matching.push_back(endpoint);
     }
     _observation.store(std::const_pointer_cast<const Observation>(observation));
 
+    // Strictly prioritize A2DP Stereo Render (`Headphones`) ahead of Hands-Free (`Headset`) and
+    // Capture endpoints so reconnect brings up A2DP AVDTP cleanly instead of racing `BTAGService`
+    // into an HFP-only ACL connection that drops after 8 seconds.
+    std::stable_sort(
+        matching.begin(), matching.end(), [](const EndpointInfo &a, const EndpointInfo &b) {
+            const auto prio = [](const EndpointInfo &e) {
+                if (e.isRender && !e.isHandsFree) {
+                    return 0;
+                }
+                if (e.isRender && e.isHandsFree) {
+                    return 1;
+                }
+                return 2;
+            };
+            return prio(a) < prio(b);
+        });
+
+    const bool isReconnect = (propertyId == KSPROPERTY_ONESHOT_RECONNECT);
     bool accepted = false;
+    bool stereoAccepted = false;
     bool renderAccepted = false;
-    for (const auto &endpoint : endpoints) {
+    for (const auto &endpoint : matching) {
         if (stopToken.stop_requested()) {
             break;
         }
-        if (NormalizeContainerId(endpoint.containerId) != selectedContainerKey) {
-            continue;
+        // On reconnect, once A2DP Stereo accepted the request, do NOT also poke Hands-Free so
+        // `BTAGService` never collides with `BthA2dp` during ACL/AVDTP bring-up.
+        if (isReconnect && stereoAccepted) {
+            break;
         }
-        // Poke ALL Render endpoints (both A2DP Stereo and HFP Render) so Windows brings up
-        // stereo playback reliably; only fall through to Capture endpoints if no Render endpoint
-        // accepted the request.
         if (!endpoint.isRender && renderAccepted) {
             break;
         }
@@ -608,7 +667,15 @@ bool WindowsBackend::SendContainerProperty(
             accepted = true;
             if (endpoint.isRender) {
                 renderAccepted = true;
+                if (!endpoint.isHandsFree) {
+                    stereoAccepted = true;
+                }
             }
+            LOG(Info, "QuickConnect: BtAudio {} accepted by {} endpoint ({}).",
+                isReconnect ? "connect" : "disconnect",
+                endpoint.isRender ? (endpoint.isHandsFree ? "Hands-Free" : "A2DP Stereo")
+                                  : "Capture",
+                MaskDeviceId(endpoint.id));
         }
     }
 
