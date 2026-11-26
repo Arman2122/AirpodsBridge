@@ -87,6 +87,7 @@ public:
 private:
     WINUSB_INTERFACE_HANDLE InterfaceForPipeLocked(uint8_t pipeId);
     void RefreshPipeMapLocked();
+    void ConfigureHciPoliciesLocked();
 
     mutable std::mutex _ifaceMutex;
     UniqueHandle _file;

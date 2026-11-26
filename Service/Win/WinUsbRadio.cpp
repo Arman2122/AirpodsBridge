@@ -5,6 +5,7 @@
 #include "Service/Win/ServiceLog.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace Service::Win {
@@ -157,14 +158,15 @@ bool WinUsbRadio::Open(const std::wstring &devicePath)
     }
 
     RefreshPipeMapLocked();
+    ConfigureHciPoliciesLocked();
     _open.store(true);
 
-    ServiceLog::Write(
-        LogLevel::Info, "winusb",
-        "Opened WinUSB radio: speed=" + std::to_string(_usbIpSpeed) + " eventPipe=0x" +
-            std::to_string(_hciPipes.eventPipe) + " aclIn=0x" +
-            std::to_string(_hciPipes.aclInPipe) + " aclOut=0x" +
-            std::to_string(_hciPipes.aclOutPipe));
+    char pipeBuf[128]{};
+    std::snprintf(
+        pipeBuf, sizeof(pipeBuf),
+        "Opened WinUSB radio: speed=%u eventPipe=0x%02X aclIn=0x%02X aclOut=0x%02X", _usbIpSpeed,
+        _hciPipes.eventPipe, _hciPipes.aclInPipe, _hciPipes.aclOutPipe);
+    ServiceLog::Write(LogLevel::Info, "winusb", pipeBuf);
     return true;
 }
 
@@ -283,6 +285,9 @@ uint32_t WinUsbRadio::SetInterfaceAltSetting(uint8_t interfaceNumber, uint8_t al
     }
 
     RefreshPipeMapLocked();
+    if (interfaceNumber == _hciPipes.interfaceNumber) {
+        ConfigureHciPoliciesLocked();
+    }
     return ERROR_SUCCESS;
 }
 
@@ -345,13 +350,16 @@ uint32_t WinUsbRadio::WritePipe(
     }
 
     UniqueHandle ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    if (!ev.Valid()) {
+        return GetLastError();
+    }
     OVERLAPPED ov{};
     ov.hEvent = ev.Get();
 
     ULONG sent = 0;
     const BOOL ok = WinUsb_WritePipe(
-        iface, pipeId, const_cast<PUCHAR>(data.data()), static_cast<ULONG>(data.size()), &sent,
-        &ov);
+        iface, pipeId, data.empty() ? nullptr : const_cast<PUCHAR>(data.data()),
+        static_cast<ULONG>(data.size()), &sent, &ov);
     DWORD err = ERROR_SUCCESS;
     if (!ok) {
         DWORD ovSent = 0;
@@ -511,6 +519,86 @@ void WinUsbRadio::RefreshPipeMapLocked()
     for (const auto &[ifaceNum, handle] : _associated) {
         scan(handle.Get());
     }
+}
+
+void WinUsbRadio::ConfigureHciPoliciesLocked()
+{
+    if (!_primary.Valid()) {
+        return;
+    }
+
+    // Prevent WinUSB from selectively suspending the physical Bluetooth radio into USB D2
+    // while idle, which causes Intel/Realtek HCI Bulk OUT pipes to stall on wake.
+    UCHAR autoSuspend = FALSE;
+    const BOOL powerOk =
+        WinUsb_SetPowerPolicy(_primary.Get(), AUTO_SUSPEND, sizeof(autoSuspend), &autoSuspend);
+
+    // Bound Control EP0 transfers so a wedged HCI command can never block the EP0 worker forever.
+    ULONG ep0TimeoutMs = 5000;
+    const BOOL ep0TimeoutOk = WinUsb_SetPipePolicy(
+        _primary.Get(), 0x00, PIPE_TRANSFER_TIMEOUT, sizeof(ep0TimeoutMs), &ep0TimeoutMs);
+
+    BOOL zlpOk = FALSE;
+    BOOL aclOutTimeoutOk = FALSE;
+    BOOL aclOutAutoClearOk = FALSE;
+    if (_hciPipes.aclOutPipe != 0) {
+        if (WINUSB_INTERFACE_HANDLE outIface = InterfaceForPipeLocked(_hciPipes.aclOutPipe);
+            outIface != nullptr)
+        {
+            // Bluetooth Core Spec Vol 4 Part B §2.1: any HCI ACL Bulk OUT transfer whose length is
+            // an exact multiple of wMaxPacketSize (e.g. 64 B on Full-Speed USB) MUST be terminated
+            // with a Zero-Length Packet (ZLP). Without SHORT_PACKET_TERMINATE, fixed-size CBR SBC
+            // A2DP frames or 64-byte-multiple ACL packets corrupt USB framing and wedge EP 0x02.
+            UCHAR enable = TRUE;
+            zlpOk = WinUsb_SetPipePolicy(
+                outIface, _hciPipes.aclOutPipe, SHORT_PACKET_TERMINATE, sizeof(enable), &enable);
+
+            // Guarantee Bulk OUT writes never block indefinitely if the controller NAKs/stalls.
+            ULONG outTimeoutMs = 2000;
+            aclOutTimeoutOk = WinUsb_SetPipePolicy(
+                outIface, _hciPipes.aclOutPipe, PIPE_TRANSFER_TIMEOUT, sizeof(outTimeoutMs),
+                &outTimeoutMs);
+
+            // Best-effort auto-clear stall on OUT pipe (supported on newer WinUSB builds).
+            aclOutAutoClearOk = WinUsb_SetPipePolicy(
+                outIface, _hciPipes.aclOutPipe, AUTO_CLEAR_STALL, sizeof(enable), &enable);
+#ifdef RESET_PIPE_ON_RESUME
+            WinUsb_SetPipePolicy(
+                outIface, _hciPipes.aclOutPipe, RESET_PIPE_ON_RESUME, sizeof(enable), &enable);
+#endif
+        }
+    }
+
+    auto configureInPipe = [this](uint8_t pipeId) -> BOOL {
+        if (pipeId == 0) {
+            return FALSE;
+        }
+        WINUSB_INTERFACE_HANDLE inIface = InterfaceForPipeLocked(pipeId);
+        if (inIface == nullptr) {
+            return FALSE;
+        }
+        // Keep PIPE_TRANSFER_TIMEOUT = 0 (infinite) on Interrupt IN / Bulk IN because Windows'
+        // BTHPORT posts persistent reads waiting for asynchronous Bluetooth events and ACL data.
+        UCHAR enable = TRUE;
+        const BOOL clearOk =
+            WinUsb_SetPipePolicy(inIface, pipeId, AUTO_CLEAR_STALL, sizeof(enable), &enable);
+#ifdef RESET_PIPE_ON_RESUME
+        WinUsb_SetPipePolicy(inIface, pipeId, RESET_PIPE_ON_RESUME, sizeof(enable), &enable);
+#endif
+        return clearOk;
+    };
+
+    const BOOL eventAutoClearOk = configureInPipe(_hciPipes.eventPipe);
+    const BOOL aclInAutoClearOk = configureInPipe(_hciPipes.aclInPipe);
+
+    char msg[256]{};
+    std::snprintf(
+        msg, sizeof(msg),
+        "Configured WinUSB HCI policies: autoSuspendOff=%d ep0Timeout=%d zlpOut=%d "
+        "aclOutTimeout=%d autoClearStall(ev=%d,in=%d,out=%d)",
+        powerOk ? 1 : 0, ep0TimeoutOk ? 1 : 0, zlpOk ? 1 : 0, aclOutTimeoutOk ? 1 : 0,
+        eventAutoClearOk ? 1 : 0, aclInAutoClearOk ? 1 : 0, aclOutAutoClearOk ? 1 : 0);
+    ServiceLog::Write(LogLevel::Info, "winusb", msg);
 }
 
 } // namespace Service::Win

@@ -218,6 +218,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed permanent HCI Bulk OUT (`EP 0x02`) hangs, handle leaks, and SBC audio/AAP drops in the
+  No-Test-Mode Radio Proxy Service (`Service/Win/WinUsbRadio.h/.cpp`,
+  `Service/Win/RadioBridgeSession.h/.cpp`):
+  - Enabled WinUSB `SHORT_PACKET_TERMINATE` on the HCI Bulk OUT pipe per Bluetooth Core Spec
+    Vol 4 Part B §2.1 so 64-byte-multiple ACL transfers (common in CBR SBC A2DP media and AAP
+    packets on Full-Speed USB Bluetooth adapters) always emit the required USB Zero-Length
+    Packet terminator instead of corrupting ACL framing and stalling `EP 0x02`.
+  - Disabled WinUSB `AUTO_SUSPEND` on the proxied physical Bluetooth radio so Windows never
+    selectively suspends the adapter into USB D2 while idle, enabled `AUTO_CLEAR_STALL` (and
+    `RESET_PIPE_ON_RESUME`) on HCI pipes, and set bounded `PIPE_TRANSFER_TIMEOUT` values
+    (`2000 ms` on Bulk OUT, `5000 ms` on Control EP0) so Bulk OUT writes can never wedge
+    indefinitely.
+  - Added session `_stopEvent` cancellation for injected WinUSB transfers plus automatic
+    `WinUsb_ResetPipe` stall/timeout recovery and self-healing session recycle after repeated
+    unrecoverable Bulk OUT timeouts.
 - Fixed phantom `DEVICE_STATE_NOTPRESENT` endpoints from earlier Bluetooth bus instances
   breaking AirPods audio routing and causing 8-second reconnect drops (`Source/Core/AudioControl_win.cpp`,
   `Source/Core/QuickConnect_win.cpp`, `Service/Protocol/HciProxyEngine.cpp`):

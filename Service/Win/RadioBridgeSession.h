@@ -81,6 +81,7 @@ private:
     void PipeWorkerLoop(uint8_t pipeAddr, std::shared_ptr<PipeQueue> pq);
     void DrainInjectedAcl(uint8_t pipeAddr);
     void ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<PendingUrb> &urb);
+    void HandleWritePipeFailure(uint8_t pipeAddr, size_t len, uint32_t err, const char *origin);
     bool SendReply(std::span<const uint8_t> frame);
     void MarkDeviceLost(uint32_t win32Err);
 
@@ -88,9 +89,11 @@ private:
     WinUsbRadio &_radio;
     Protocol::HciProxyEngine &_hci;
     Protocol::UsbIp::BluetoothHciPipes _hciPipes;
+    UniqueHandle _stopEvent;
 
     std::atomic<bool> _stopped{false};
     std::atomic<bool> _deviceLost{false};
+    std::atomic<uint32_t> _consecutiveAclOutTimeouts{0};
     std::mutex _writeMutex;
 
     std::mutex _pipesMutex;

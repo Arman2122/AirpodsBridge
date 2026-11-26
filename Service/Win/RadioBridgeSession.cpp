@@ -8,10 +8,19 @@
 #include <avrt.h>
 
 #include <algorithm>
+#include <cstdio>
 
 namespace Service::Win {
 
 namespace {
+
+constexpr uint32_t kMaxConsecutiveAclOutTimeouts = 5;
+
+bool IsRecoverablePipeError(uint32_t win32Error) noexcept
+{
+    return win32Error == ERROR_SEM_TIMEOUT || win32Error == ERROR_GEN_FAILURE ||
+           win32Error == ERROR_IO_DEVICE || win32Error == ERROR_CRC;
+}
 
 bool IsHciCommandSetup(const std::array<uint8_t, 8> &setup)
 {
@@ -34,7 +43,8 @@ bool IsClearFeatureHalt(const std::array<uint8_t, 8> &setup)
 
 RadioBridgeSession::RadioBridgeSession(
     UniqueSocket clientSocket, WinUsbRadio &radio, Protocol::HciProxyEngine &hci)
-    : _socket{std::move(clientSocket)}, _radio{radio}, _hci{hci}, _hciPipes{radio.HciPipes()}
+    : _socket{std::move(clientSocket)}, _radio{radio}, _hci{hci}, _hciPipes{radio.HciPipes()},
+      _stopEvent{CreateEventW(nullptr, TRUE, FALSE, nullptr)}
 {
 }
 
@@ -47,6 +57,10 @@ void RadioBridgeSession::Stop()
 {
     if (_stopped.exchange(true)) {
         return;
+    }
+
+    if (_stopEvent.Valid()) {
+        SetEvent(_stopEvent.Get());
     }
 
     if (_socket.Valid()) {
@@ -297,18 +311,55 @@ void RadioBridgeSession::DrainInjectedAcl(uint8_t pipeAddr)
     uint16_t handle = 0;
     while (!_stopped.load() && _hci.PopNextInjectedAcl(pkt, handle)) {
         uint32_t written = 0;
-        const uint32_t err = _radio.WritePipe(pipeAddr, pkt, written);
+        const uint32_t err = _radio.WritePipe(pipeAddr, pkt, written, _stopEvent.Get());
         if (err != ERROR_SUCCESS) {
             _hci.RevertInjectedAcl(handle);
-            ServiceLog::Write(
-                LogLevel::Warn, "radio",
-                "Injected HCI ACL write failed (handle=" + std::to_string(handle) +
-                    "): " + FormatWin32Error(err));
-            if (WinUsbRadio::IsFatalDeviceLossError(err)) {
-                MarkDeviceLost(err);
-            }
+            HandleWritePipeFailure(pipeAddr, pkt.size(), err, "injected HCI ACL");
             break;
         }
+        if (pipeAddr == _hciPipes.aclOutPipe) {
+            _consecutiveAclOutTimeouts.store(0);
+        }
+    }
+}
+
+void RadioBridgeSession::HandleWritePipeFailure(
+    uint8_t pipeAddr, size_t len, uint32_t err, const char *origin)
+{
+    if (err == ERROR_OPERATION_ABORTED || _stopped.load()) {
+        return;
+    }
+
+    char prefix[160]{};
+    std::snprintf(
+        prefix, sizeof(prefix), "Bulk OUT write failed (%s, pipe=0x%02X, len=%zu): ", origin,
+        pipeAddr, len);
+    ServiceLog::Write(LogLevel::Warn, "radio", std::string{prefix} + FormatWin32Error(err));
+
+    if (IsRecoverablePipeError(err)) {
+        const uint32_t resetErr = _radio.ResetPipe(pipeAddr);
+        char resetBuf[160]{};
+        std::snprintf(resetBuf, sizeof(resetBuf), "ResetPipe(0x%02X) after OUT error: ", pipeAddr);
+        ServiceLog::Write(
+            resetErr == ERROR_SUCCESS ? LogLevel::Info : LogLevel::Warn, "radio",
+            std::string{resetBuf} +
+                (resetErr == ERROR_SUCCESS ? "ok" : FormatWin32Error(resetErr)));
+
+        if (pipeAddr == _hciPipes.aclOutPipe && err == ERROR_SEM_TIMEOUT) {
+            const uint32_t streak = _consecutiveAclOutTimeouts.fetch_add(1) + 1;
+            if (streak >= kMaxConsecutiveAclOutTimeouts) {
+                ServiceLog::Write(
+                    LogLevel::Error, "radio",
+                    "HCI Bulk OUT pipe timed out " + std::to_string(streak) +
+                        " times consecutively despite ResetPipe; recycling radio session.");
+                MarkDeviceLost(err);
+                return;
+            }
+        }
+    }
+
+    if (WinUsbRadio::IsFatalDeviceLossError(err)) {
+        MarkDeviceLost(err);
     }
 }
 
@@ -325,9 +376,14 @@ void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<Pend
     // Internal injected ACL packet (hidden from Windows).
     if (urb->internal && !urb->internalCommand) {
         uint32_t written = 0;
-        const uint32_t err = _radio.WritePipe(pipeAddr, urb->outPayload, written);
-        if (WinUsbRadio::IsFatalDeviceLossError(err)) {
-            MarkDeviceLost(err);
+        const uint32_t err = _radio.WritePipe(pipeAddr, urb->outPayload, written, _stopEvent.Get());
+        if (err == ERROR_SUCCESS) {
+            if (pipeAddr == _hciPipes.aclOutPipe) {
+                _consecutiveAclOutTimeouts.store(0);
+            }
+        }
+        else {
+            HandleWritePipeFailure(pipeAddr, urb->outPayload.size(), err, "queued internal ACL");
         }
         return;
     }
@@ -346,7 +402,13 @@ void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<Pend
         };
         std::vector<uint8_t> ignored;
         uint32_t xfer = 0;
-        const uint32_t err = _radio.ControlTransfer(setup, urb->outPayload, ignored, xfer);
+        const uint32_t err =
+            _radio.ControlTransfer(setup, urb->outPayload, ignored, xfer, _stopEvent.Get());
+        if (err != ERROR_SUCCESS && err != ERROR_OPERATION_ABORTED) {
+            ServiceLog::Write(
+                LogLevel::Warn, "radio",
+                "Injected HCI command on EP0 failed: " + FormatWin32Error(err));
+        }
         if (WinUsbRadio::IsFatalDeviceLossError(err)) {
             MarkDeviceLost(err);
         }
@@ -488,8 +550,13 @@ void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<Pend
 
     uint32_t written = 0;
     const uint32_t err = _radio.WritePipe(pipeAddr, toSend, written, urb->cancelEvent.Get());
-    if (WinUsbRadio::IsFatalDeviceLossError(err)) {
-        MarkDeviceLost(err);
+    if (err == ERROR_SUCCESS) {
+        if (pipeAddr == _hciPipes.aclOutPipe) {
+            _consecutiveAclOutTimeouts.store(0);
+        }
+    }
+    else {
+        HandleWritePipeFailure(pipeAddr, toSend.size(), err, "Windows HCI ACL");
     }
     SendReply(Protocol::UsbIp::EncodeRetSubmit(
         hdr.seqnum, Protocol::UsbIp::Win32ErrorToErrno(err),
@@ -510,6 +577,10 @@ void RadioBridgeSession::MarkDeviceLost(uint32_t win32Err)
     if (!_deviceLost.exchange(true)) {
         ServiceLog::Write(
             LogLevel::Warn, "radio", "Physical WinUSB radio lost: " + FormatWin32Error(win32Err));
+        std::lock_guard<std::mutex> lock{_writeMutex};
+        if (_socket.Valid()) {
+            shutdown(_socket.Get(), SD_BOTH);
+        }
     }
 }
 
