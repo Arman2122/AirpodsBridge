@@ -677,8 +677,10 @@ void AapProtocolTests::AppliesInboundMessagesAndMergesInStateManager()
     QCOMPARE(uBatt->newState.pods.right.battery.Value(), 88U);
     QCOMPARE(uBatt->newState.caseBox.battery.Value(), 64U);
     QVERIFY(uBatt->newState.caseBox.isCharging);
+    QVERIFY(uBatt->newState.caseBox.isLidOpened);
 
-    // Case lid closes -> AirPods send Case status 0x04 (Disconnected); 64% stays visible!
+    // Case lid closes -> AirPods send Case status 0x04 (Disconnected); 64% stays visible,
+    // while `isLidOpened` turns false cleanly!
     const auto caseClosed = DecodePacket(std::vector<uint8_t>{
         0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01, // 1 component
         0x08, 0x01, 0x7F, 0x04, 0x01,             // Case: disconnected
@@ -690,6 +692,7 @@ void AapProtocolTests::AppliesInboundMessagesAndMergesInStateManager()
     QVERIFY(uClosed->newState.caseBox.battery.Available());
     QCOMPARE(uClosed->newState.caseBox.battery.Value(), 64U);
     QVERIFY(!uClosed->newState.caseBox.isCharging);
+    QVERIFY(!uClosed->newState.caseBox.isLidOpened);
 }
 
 QTEST_GUILESS_MAIN(AapProtocolTests)

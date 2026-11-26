@@ -562,41 +562,35 @@ void AppleNoiseControl::CommitSliderPosition(qreal normalizedPos)
         return;
     }
 
-    // Exact iOS 27 5-stop snapping:
-    //   0.00 = Transparency
-    //   0.25 = Adaptive (More Ambient, level 20%)
-    //   0.50 = Adaptive (Balanced, level 50%)
-    //   0.75 = Adaptive (More Noise Cancellation, level 80%)
-    //   1.00 = Noise Cancellation
+    // Continuous iOS 27 Adaptive inner pill:
+    //   0.00       = Transparency
+    //   0.25..0.75 = Adaptive Audio (continuous 0..100% across the entire brighter inner pill)
+    //   1.00       = Noise Cancellation
     _thumbVisible = true;
-    if (normalizedPos < 0.13) {
+    if (normalizedPos < 0.14) {
         AnimateThumbTo(0.0, true);
         if (_presentation.activeMode != NoiseControlMode::Transparency) {
             Q_EMIT NoiseControlModeRequested(NoiseControlMode::Transparency);
         }
     }
-    else if (normalizedPos > 0.87) {
+    else if (normalizedPos > 0.86) {
         AnimateThumbTo(1.0, true);
         if (_presentation.activeMode != NoiseControlMode::NoiseCancellation) {
             Q_EMIT NoiseControlModeRequested(NoiseControlMode::NoiseCancellation);
         }
     }
     else {
-        qreal snap = 0.50;
-        uint8_t adaptiveLevel = 50;
-        if (normalizedPos < 0.375) {
-            snap = 0.25;
-            adaptiveLevel = 20;
-        }
-        else if (normalizedPos > 0.625) {
-            snap = 0.75;
-            adaptiveLevel = 80;
-        }
-        AnimateThumbTo(snap, true);
+        const uint8_t prevLevel = _presentation.adaptiveNoiseLevel;
+        const qreal clamped = std::clamp(normalizedPos, 0.25, 0.75);
+        const uint8_t adaptiveLevel =
+            static_cast<uint8_t>(std::lround(((clamped - 0.25) / 0.50) * 100.0));
+        const qreal exactPos = 0.25 + (static_cast<qreal>(adaptiveLevel) / 100.0) * 0.50;
+        _presentation.adaptiveNoiseLevel = adaptiveLevel;
+        AnimateThumbTo(exactPos, true);
         if (_presentation.activeMode != NoiseControlMode::Adaptive) {
             Q_EMIT NoiseControlModeRequested(NoiseControlMode::Adaptive);
         }
-        if (adaptiveLevel != _presentation.adaptiveNoiseLevel) {
+        if (adaptiveLevel != prevLevel) {
             Q_EMIT AdaptiveNoiseLevelRequested(adaptiveLevel);
         }
     }
@@ -723,6 +717,16 @@ void AppleNoiseControl::keyPressEvent(QKeyEvent *event)
             if (_presentation.activeMode == NoiseControlMode::NoiseCancellation) {
                 Q_EMIT NoiseControlModeRequested(NoiseControlMode::Adaptive);
             }
+            else if (
+                _presentation.activeMode == NoiseControlMode::Adaptive &&
+                _presentation.adaptiveNoiseLevel > 0)
+            {
+                const uint8_t nextLevel =
+                    _presentation.adaptiveNoiseLevel > 10
+                        ? static_cast<uint8_t>(_presentation.adaptiveNoiseLevel - 10)
+                        : uint8_t{0};
+                Q_EMIT AdaptiveNoiseLevelRequested(nextLevel);
+            }
             else {
                 Q_EMIT NoiseControlModeRequested(NoiseControlMode::Transparency);
             }
@@ -743,6 +747,14 @@ void AppleNoiseControl::keyPressEvent(QKeyEvent *event)
                 _presentation.activeMode == NoiseControlMode::Off)
             {
                 Q_EMIT NoiseControlModeRequested(NoiseControlMode::Adaptive);
+            }
+            else if (
+                _presentation.activeMode == NoiseControlMode::Adaptive &&
+                _presentation.adaptiveNoiseLevel < 100)
+            {
+                const uint8_t nextLevel = static_cast<uint8_t>(
+                    std::min<int>(100, static_cast<int>(_presentation.adaptiveNoiseLevel) + 10));
+                Q_EMIT AdaptiveNoiseLevelRequested(nextLevel);
             }
             else {
                 Q_EMIT NoiseControlModeRequested(NoiseControlMode::NoiseCancellation);
@@ -819,14 +831,14 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
         const qreal xSolid = ThumbCenterX(0.75);
         const qreal xAnc = ThumbCenterX(1.0);
 
-        // Inner nested Adaptive zone pill (exact iOS 27 Screenshots 3 & 4)
-        const qreal innerPad = 23.0;
+        // Inner nested Adaptive zone pill matching the exact 0..100% thumb travel [0.25..0.75]
+        const qreal innerPad = ThumbWidth() / 2.0;
         const QRectF adaptiveZone{
             xDot - innerPad, cap.top() + kThumbInset, (xSolid - xDot) + innerPad * 2.0,
             cap.height() - kThumbInset * 2.0};
         const qreal zoneR = adaptiveZone.height() / 2.0;
         painter.setPen(Qt::NoPen);
-        painter.setBrush(isDark ? QColor{255, 255, 255, 24} : QColor{0, 0, 0, 13});
+        painter.setBrush(isDark ? QColor{255, 255, 255, 26} : QColor{0, 0, 0, 14});
         painter.drawRoundedRect(adaptiveZone, zoneR, zoneR);
 
         // Draw landmarks on the track. When the thumb itself sits inside the Adaptive zone,
@@ -892,10 +904,10 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
         // Active white glyph centered inside the thumb
         const QColor glyphFg = neutralOffThumb ? colours.TextPrimary : colours.OnAccent;
         if (_presentation.supportsAdaptive) {
-            if (_thumbPos < 0.13) {
+            if (_thumbPos < 0.14) {
                 DrawTransparencyGlyph(painter, thumbRect.center(), iconScale, glyphFg);
             }
-            else if (_thumbPos > 0.87) {
+            else if (_thumbPos > 0.86) {
                 DrawNoiseCancellationGlyph(painter, thumbRect.center(), iconScale, glyphFg);
             }
             else {
@@ -934,16 +946,37 @@ void AppleNoiseControl::PaintLiquidGlassCapsule(QPainter &painter) const
 
     if (_presentation.supportsAdaptive) {
         const qreal w = static_cast<qreal>(width());
+        const bool draggingAdaptive = _dragging && _thumbPos >= 0.14 && _thumbPos <= 0.86;
+        const bool adaptiveOn =
+            draggingAdaptive || _presentation.activeMode == NoiseControlMode::Adaptive;
+        QString adaptiveText = tr("Adaptive");
+        if (draggingAdaptive) {
+            const qreal clamped = std::clamp(_thumbPos, 0.25, 0.75);
+            const int livePct = static_cast<int>(std::lround(((clamped - 0.25) / 0.50) * 100.0));
+            adaptiveText =
+                QStringLiteral("%1 %2 %3%").arg(tr("Adaptive")).arg(QChar{0x00B7}).arg(livePct);
+        }
+        else if (
+            _presentation.activeMode == NoiseControlMode::Adaptive &&
+            (_presentation.adaptiveNoiseLevel < 48 || _presentation.adaptiveNoiseLevel > 52))
+        {
+            adaptiveText = QStringLiteral("%1 %2 %3%")
+                               .arg(tr("Adaptive"))
+                               .arg(QChar{0x00B7})
+                               .arg(_presentation.adaptiveNoiseLevel);
+        }
         drawLabel(
             QRectF{4.0, labelY, w * 0.34, kCapsuleLabelHeight}, Qt::AlignLeft, tr("Transparency"),
-            _presentation.activeMode == NoiseControlMode::Transparency);
+            (_dragging && _thumbPos < 0.14) ||
+                (!_dragging && _presentation.activeMode == NoiseControlMode::Transparency));
         drawLabel(
-            QRectF{w * 0.32, labelY, w * 0.36, kCapsuleLabelHeight}, Qt::AlignHCenter,
-            tr("Adaptive"), _presentation.activeMode == NoiseControlMode::Adaptive);
+            QRectF{w * 0.28, labelY, w * 0.44, kCapsuleLabelHeight}, Qt::AlignHCenter, adaptiveText,
+            adaptiveOn);
         drawLabel(
             QRectF{w * 0.56, labelY, w * 0.44 - 4.0, kCapsuleLabelHeight}, Qt::AlignRight,
             tr("Noise Cancellation"),
-            _presentation.activeMode == NoiseControlMode::NoiseCancellation);
+            (_dragging && _thumbPos > 0.86) ||
+                (!_dragging && _presentation.activeMode == NoiseControlMode::NoiseCancellation));
     }
     else {
         const qreal w = static_cast<qreal>(width());

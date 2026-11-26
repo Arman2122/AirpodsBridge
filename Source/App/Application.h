@@ -108,6 +108,9 @@ private:
     // it captures.
     std::vector<Core::Settings::Subscription> _settingsWatches;
     bool _showPopupOnLidOpen{true};
+    bool _autoEnableRadioService{true};
+    bool _firstTimeSetupRan{false};
+    bool _autoEnableRadioAttempted{false};
     bool _nativeToastNotifications{true};
     bool _updateCheckEnabled{false};
     bool _trayWelcomePending{false};
@@ -115,6 +118,7 @@ private:
 
     void InitSettings(Core::Settings::LoadResult loadResult);
     void FirstTimeUse();
+    void EnsureRadioServiceEnabledOnStart();
     void ShowTrayWelcome();
 
     void ConnectAirPodsManager();

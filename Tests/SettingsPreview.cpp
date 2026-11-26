@@ -143,12 +143,9 @@ int main(int argc, char *argv[])
                                                       73, 79, 88, 82, 76, 72};
         return Gui::SettingsWindow::RadioControlInfo{
             .engineHeadline = QStringLiteral("Active"),
-            .engineDetail =
-                QStringLiteral("Active (WinUSB + signed usbip-win2, Secure Boot ON). 1 AAP "
-                               "channel(s) open \u00B7 3.75 ms poll latency."),
+            .engineDetail = QStringLiteral("Active %1 Connected").arg(QChar{0x00B7}),
             .adapterSummary =
-                QStringLiteral("Intel(R) Wireless Bluetooth(R) (VID 8087 / PID 0036) \u00B7 "
-                               "Proxied via WinUSB"),
+                QStringLiteral("Intel Wireless Bluetooth %1 Active").arg(QChar{0x00B7}),
             .serviceInstalled = true,
             .serviceRunning = true,
             .guardTripped = false,

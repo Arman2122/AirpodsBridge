@@ -791,9 +791,11 @@ bool ApplyInboundMessage(State &state, const InboundMessage &message, bool prima
                         ApplyBatteryPart(state.pods.right, entry);
                         break;
                     case ComponentType::Case:
-                        // When the charging case lid shuts, AirPods report the case as
-                        // Disconnected; keep the last known 1% case level visible (matching iOS)
-                        // until a fresh case reading arrives or Bluetooth disconnects.
+                        // AirPods report a live Case battery over AAP only while the charging case
+                        // lid is open (and switch Case to Disconnected when the lid closes). Keep
+                        // the last known 1% case level visible (matching iOS) until a fresh reading
+                        // arrives or Bluetooth disconnects.
+                        state.caseBox.isLidOpened = (entry.status != ChargeStatus::Disconnected);
                         ApplyBatteryPart(state.caseBox, entry, true);
                         break;
                     }

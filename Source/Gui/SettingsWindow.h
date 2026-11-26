@@ -161,10 +161,9 @@ private:
     Widget::Slider *_volumeCapSlider{nullptr};
     QLabel *_volumeCapValue{nullptr};
     Widget::SettingsRow *_latencyProfileRow{nullptr};
-    Widget::PushButton *_latencyModeButton{nullptr};
-    bool _latencyTargetLowLatency{true};
+    Widget::SegmentedControl *_latencyModeSegment{nullptr};
 
-    // AirPods Control (No-Test-Mode Radio Service + live AAP settings)
+    // AirPods Control (Control Engine + live AAP settings)
     Widget::SettingsRow *_radioStatusRow{nullptr};
     QWidget *_radioProgressContainer{nullptr};
     Widget::ProgressBar *_radioProgressBar{nullptr};
@@ -176,9 +175,6 @@ private:
     Widget::AppleNoiseControl *_aapNoiseControl{nullptr};
     Widget::SettingsRow *_aapConvAwarenessRow{nullptr};
     Widget::Toggle *_aapConvAwareness{nullptr};
-    Widget::SettingsRow *_aapAdaptiveRow{nullptr};
-    Widget::Slider *_aapAdaptiveSlider{nullptr};
-    QLabel *_aapAdaptiveValue{nullptr};
     Widget::SettingsRow *_aapPersonalizedVolRow{nullptr};
     Widget::Toggle *_aapPersonalizedVol{nullptr};
     Widget::SettingsRow *_aapOneBudAncRow{nullptr};

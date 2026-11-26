@@ -52,6 +52,7 @@ public:
     // opening nearby is noticed. This costs idle CPU; see Docs/Performance.md.
     void SetScanWhileDisconnected(bool enable);
     void SetShowNearbyWhenDisconnected(bool enable);
+    void SetShowPopupOnLidOpen(bool enable);
 
     // Future-proof two-way control actions (active whenever an AAP ControlTransport is
     // connected; safe no-ops on BLE-only sessions).
@@ -120,6 +121,7 @@ private:
     bool _scannerWanted{false};
     bool _scanWhileDisconnected{false};
     bool _showNearbyWhenDisconnected{true};
+    bool _showPopupOnLidOpen{true};
     std::optional<State> _lastNearbyState;
     std::chrono::steady_clock::time_point _lastNearbySeen{};
     bool _lastNearbyLidOpen{false};
@@ -138,13 +140,20 @@ private:
     int _heartRateAttempt{0};
     std::chrono::steady_clock::time_point _lastHeartRateSampleTime{};
     std::optional<uint16_t> _lastLoggedBpm;
-    // Allow-Off listening mode (0x34) state & bounce-back protection for AirPods Pro 2/3 & 4/5.
+    // AAP handshake & listening-mode settle state (prevents Adaptive->Off and Off->Previous
+    // bounces).
+    bool _aapFeaturesEnabledSent{false};
     bool _allowOffSentToDevice{false};
     bool _userDisabledAllowOff{false};
     uint64_t _pendingOffModeEpoch{0};
     std::chrono::steady_clock::time_point _pendingOffModeUntil{};
     std::chrono::steady_clock::time_point _pendingOffModeSendAt{};
     bool _offModeRetrySent{false};
+    uint64_t _pendingAdaptiveEpoch{0};
+    std::chrono::steady_clock::time_point _pendingAdaptiveUntil{};
+    std::chrono::steady_clock::time_point _adaptiveRequestedAt{};
+    bool _adaptiveRetrySent{false};
+    uint64_t _adaptiveLevelEpoch{0};
     // Mirrors the state manager's threshold for the disconnected path, which never reaches
     // the state manager. Rejects everything until the setting arrives.
     int16_t _rssiMin{std::numeric_limits<int16_t>::max()};
@@ -177,6 +186,7 @@ private:
     void CompleteBoundDeviceLookup(uint64_t address, std::optional<Bluetooth::Device> device);
     void HandleBoundDeviceConnectionStateChanged(Bluetooth::DeviceState state);
     void OnControlConnectionChanged(bool connected);
+    void CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate);
     void OnControlPacketReceived(std::span<const uint8_t> packet);
     void StartHeartRateCampaignLater(bool resetAttempts);
     void RunHeartRateAttempt(uint64_t epoch, int attempt);

@@ -218,6 +218,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed radio proxy instability, USB speed misreporting, duplicate virtual ports, and ACL
+  buffer overflow timeouts (`Service/Win/WinUsbRadio.cpp`, `Service/Win/RadioBridgeSession.cpp`,
+  `Service/Win/UsbIpServer.h/.cpp`, `Service/Win/RadioEngine.cpp`,
+  `Service/Protocol/HciProxyEngine.h/.cpp`):
+  - Fixed `WinUsb_QueryDeviceInformation(DEVICE_SPEED)` mapping `0x01` (`LowSpeed`/Full-Speed)
+    to `kSpeedFull` (12 Mbps) instead of `kSpeedLow` (1.5 Mbps), which previously caused
+    `usbip-win2` to attach Bluetooth radios at USB Low Speed.
+  - Reserved up to 2 hardware HCI ACL buffers in `HCI_Read_Buffer_Size` (`0x1005`) exclusively
+    for hidden AAP traffic so Windows A2DP audio + AAP packets can never overflow the physical
+    Bluetooth controller's ACL buffer pool.
+  - Stopped calling `WinUsb_ResetPipe` on flow-control `ERROR_SEM_TIMEOUT` (which desynchronized
+    the USB Data Toggle on non-halted endpoints) and added stale `usbip-win2` port cleanup +
+    active bus-ID import guard so duplicate virtual Bluetooth adapters never accumulate.
+  - Preserved the friendly Bluetooth adapter name across WinUSB bindings instead of displaying
+    `"WinUsb Device"`.
+- Fixed Adaptive Audio jumping to Listening Off, 30-second feature delay on connect, and
+  missing case-open popups (`Source/Core/AirPods.h/.cpp`, `Source/Domain/AapProtocol.cpp`):
+  - Sequenced AAP startup so `EnableFeatures` (`0x4D`) and `RequestNotifications` (`0x0F`) wait
+    for the AirPods Handshake ACK (with a 220 ms fallback) instead of firing ahead of it, plus
+    added an Adaptive bounce-to-Off retry guard and deferred `0x2E` level delivery right after
+    switching into Adaptive mode.
+  - Mapped live AAP `Case` battery presence/disconnect transitions to `caseBox.isLidOpened` and
+    kept disconnected lid-open scanning active whenever `show_popup_on_lid_open` is enabled so
+    opening the charging case reliably triggers the popup.
+- Upgraded Listening Mode slider, Audio mode clarity, minimal Settings copy, and automatic
+  Control Engine startup (`Source/Gui/Widget/AppleNoiseControl.cpp`,
+  `Source/Gui/SettingsWindow.h/.cpp`, `Source/Core/Settings.h`, `Source/App/Application.h/.cpp`):
+  - Made the brighter inner Adaptive pill continuously draggable across the full 0–100% range
+    (replacing the 3 coarse snaps and removing the redundant Settings slider row).
+  - Replaced the ambiguous codec button with a clear **`Music (AAC)` / `Gaming (SBC)`**
+    segmented selector and simplified Control Engine / Adapter / Health descriptions.
+  - Added **Start automatically** (`auto_enable_radio_service`, enabled by default) so the
+    Control Engine starts automatically when AirpodsBridge opens unless switched to manual mode.
 - Fixed permanent HCI Bulk OUT (`EP 0x02`) hangs, handle leaks, and SBC audio/AAP drops in the
   No-Test-Mode Radio Proxy Service (`Service/Win/WinUsbRadio.h/.cpp`,
   `Service/Win/RadioBridgeSession.h/.cpp`):

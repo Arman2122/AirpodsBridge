@@ -493,18 +493,15 @@ QWidget *SettingsWindow::BuildControlPage()
     const auto &meta = GetConstMetaFields();
     auto *column = MakeColumn(this);
 
-    auto *engine = new Widget::SettingsGroup{tr("Control engine (no Test Mode)"), column};
+    auto *engine = new Widget::SettingsGroup{tr("Control engine"), column};
 
     _radioPrimaryButton = MakeButton(tr("Enable"), column);
     _radioPrimaryButton->SetPrimary(true);
     _radioStatusRow = engine->AddRow(
-        tr("Radio proxy service"),
-        tr("Uses Windows' built-in WinUSB driver and signed usbip-win2 to unlock full two-way "
-           "AirPods controls while Secure Boot stays on."),
+        tr("Control engine"), tr("Enables noise control, 1% battery, and heart rate."),
         _radioPrimaryButton);
     connect(_radioPrimaryButton, &QPushButton::clicked, this, [this] {
-        SetRadioSetupBusy(
-            true, tr("Approve the Windows administrator prompt to configure the engine..."));
+        SetRadioSetupBusy(true, tr("Approve the administrator prompt to continue..."));
         emit RadioServiceActionRequested(_radioPrimaryAction);
     });
 
@@ -518,25 +515,28 @@ QWidget *SettingsWindow::BuildControlPage()
     _radioProgressContainer->hide();
     engine->AddWidget(_radioProgressContainer);
 
+    auto *autoEnableRadio = new Widget::Toggle;
+    engine->AddRow(
+        tr("Start automatically"), meta.auto_enable_radio_service.Description(), autoEnableRadio);
+    BindToggle(autoEnableRadio, &Fields::auto_enable_radio_service, _refreshers);
+
     _radioRestoreButton = MakeButton(tr("Restore native"), column);
     _radioRestoreButton->setEnabled(false);
-    _radioAdapterRow = engine->AddRow(
-        tr("Bluetooth adapter"), tr("Not active. Standard Windows Bluetooth driver is in use."),
-        _radioRestoreButton);
+    _radioAdapterRow =
+        engine->AddRow(tr("Bluetooth adapter"), tr("Standard Windows driver"), _radioRestoreButton);
     connect(_radioRestoreButton, &QPushButton::clicked, this, [this] {
-        SetRadioSetupBusy(true, tr("Restoring native Windows Bluetooth driver..."));
+        SetRadioSetupBusy(true, tr("Restoring native Bluetooth driver..."));
         emit RadioServiceActionRequested(RadioServiceAction::RestoreNative);
     });
 
     auto *lowLatencyQos = new Widget::Toggle;
     engine->AddRow(
-        tr("Low-latency HCI polling"), meta.radio_service_low_latency_qos.Description(),
-        lowLatencyQos);
+        tr("Low-latency polling"), meta.radio_service_low_latency_qos.Description(), lowLatencyQos);
     BindToggle(lowLatencyQos, &Fields::radio_service_low_latency_qos, _refreshers);
 
     auto *hfpDecline = new Widget::Toggle;
     engine->AddRow(
-        tr("HCI Hands-Free protection"), meta.radio_service_hfp_decline.Description(), hfpDecline);
+        tr("Hands-Free protection"), meta.radio_service_hfp_decline.Description(), hfpDecline);
     BindToggle(hfpDecline, &Fields::radio_service_hfp_decline, _refreshers);
 
     auto *virtualMic = new Widget::Toggle;
@@ -555,7 +555,7 @@ QWidget *SettingsWindow::BuildControlPage()
         tr("Listening mode"), Theme::Font::Body(), Widget::Label::Role::Primary,
         _aapNoiseModeContainer);
     auto *noiseSubtitle = MakeLabel(
-        tr("Drag or tap to switch active noise control directly on your AirPods over AAP L2CAP."),
+        tr("Drag or tap to switch listening modes or fine-tune Adaptive balance."),
         Theme::Font::Footnote(), Widget::Label::Role::Secondary, _aapNoiseModeContainer);
     noiseSubtitle->setWordWrap(true);
 
@@ -576,32 +576,10 @@ QWidget *SettingsWindow::BuildControlPage()
     _aapConvAwareness = new Widget::Toggle;
     _aapConvAwarenessRow = listening->AddRow(
         tr("Conversation awareness"),
-        tr("Lowers media volume and enhances nearby voices automatically when you start speaking."),
+        tr("Lowers media volume and enhances nearby voices when you start speaking."),
         _aapConvAwareness);
     connect(_aapConvAwareness, &QAbstractButton::toggled, this, [this](bool checked) {
         emit ConversationalAwarenessRequested(checked);
-    });
-
-    auto *adaptiveControl = new QWidget{column};
-    auto *adaptiveLayout = new QHBoxLayout{adaptiveControl};
-    adaptiveLayout->setContentsMargins(0, 0, 0, 0);
-    adaptiveLayout->setSpacing(10);
-    _aapAdaptiveSlider = new Widget::Slider{adaptiveControl};
-    _aapAdaptiveSlider->setRange(0, 100);
-    _aapAdaptiveSlider->setFixedWidth(150);
-    _aapAdaptiveValue = MakeLabel(
-        QStringLiteral("50%"), Theme::Font::Caption(), Widget::Label::Role::Secondary,
-        adaptiveControl);
-    _aapAdaptiveValue->setFixedWidth(36);
-    _aapAdaptiveValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    adaptiveLayout->addWidget(_aapAdaptiveSlider);
-    adaptiveLayout->addWidget(_aapAdaptiveValue);
-    _aapAdaptiveRow = listening->AddRow(
-        tr("Adaptive audio level"),
-        tr("Controls how much ambient noise Adaptive Audio allows through."), adaptiveControl);
-    connect(_aapAdaptiveSlider, &QSlider::valueChanged, this, [this](int val) {
-        _aapAdaptiveValue->setText(QStringLiteral("%1%").arg(val));
-        emit AdaptiveNoiseLevelRequested(static_cast<uint8_t>(val));
     });
 
     _aapOneBudAnc = new Widget::Toggle;
@@ -748,9 +726,7 @@ QWidget *SettingsWindow::BuildHealthPage()
 
     _aapHeartRate = new Widget::Toggle;
     _aapHeartRateRow = sensorGroup->AddRow(
-        tr("Heart rate sensor"),
-        tr("Monitors live optical heart rate telemetry over Apple RTBuddy (AAP 0x17) while worn."),
-        _aapHeartRate);
+        tr("Heart rate sensor"), tr("Monitors live optical heart rate while worn."), _aapHeartRate);
     connect(_aapHeartRate, &QAbstractButton::toggled, this, [this](bool checked) {
         emit HeartRateMonitoringRequested(checked);
     });
@@ -762,9 +738,7 @@ QWidget *SettingsWindow::BuildHealthPage()
     BindToggle(showInPopup, &Fields::show_heart_rate_in_popup, _refreshers);
 
     _aapHeartRateTelemetryRow = sensorGroup->AddRow(
-        tr("Sensor status"),
-        tr("Connect AirPods Pro 3 or Powerbeats Pro 2 with the Radio Proxy Service active."),
-        nullptr);
+        tr("Sensor status"), tr("Connect AirPods Pro 3 or Powerbeats Pro 2 to measure."), nullptr);
 
     column->layout()->addWidget(liveGroup);
     column->layout()->addWidget(sensorGroup);
@@ -841,19 +815,24 @@ QWidget *SettingsWindow::BuildAudioPage()
     latency->AddRow(tr("Keep audio stream awake"), meta.audio_keep_alive.Description(), keepAlive);
     BindToggle(keepAlive, &Fields::audio_keep_alive, _refreshers);
 
-    _latencyModeButton = MakeButton(tr("Gaming mode (SBC)"), column);
+    _latencyModeSegment = new Widget::SegmentedControl;
+    _latencyModeSegment->AddSegment(tr("Music (AAC)"));
+    _latencyModeSegment->AddSegment(tr("Gaming (SBC)"));
     _latencyProfileRow = latency->AddRow(
-        tr("Bluetooth codec & effects"),
-        tr("Switches BthA2dp to SBC and disables Audio Enhancements (admin prompt)."),
-        _latencyModeButton);
-    connect(_latencyModeButton, &QPushButton::clicked, this, [this] {
-        _latencyModeButton->setEnabled(false);
-        _latencyModeButton->setText(tr("Applying..."));
-        emit LatencyProfileSwitchRequested(_latencyTargetLowLatency);
-        // Real updates arrive immediately via LatencyDiagnosticsChanged once the native
-        // elevated helper completes; this timeout is purely a fallback safety net.
-        QTimer::singleShot(15000, this, [this] { RefreshLatencyDiagnostics(); });
-    });
+        tr("Audio mode"), tr("Choose standard AAC audio or low-latency SBC for gaming."),
+        _latencyModeSegment);
+    connect(
+        _latencyModeSegment, &Widget::SegmentedControl::CurrentIndexChanged, this, [this](int idx) {
+            if (idx < 0 || idx > 1) {
+                return;
+            }
+            _latencyModeSegment->setEnabled(false);
+            _latencyProfileRow->SetDescription(tr("Switching audio mode..."));
+            emit LatencyProfileSwitchRequested(idx == 1);
+            // Real updates arrive immediately via LatencyDiagnosticsChanged once the native
+            // elevated helper completes; this timeout is purely a fallback safety net.
+            QTimer::singleShot(15000, this, [this] { RefreshLatencyDiagnostics(); });
+        });
 
     auto *shortcuts = new Widget::SettingsGroup{tr("Global shortcuts"), column};
 
@@ -1253,7 +1232,7 @@ void SettingsWindow::RefreshRadioControl()
         _radioPrimaryButton->setText(tr("Retry engine"));
         _radioPrimaryButton->SetPrimary(true);
     }
-    else if (info.serviceInstalled) {
+    else if (info.serviceInstalled && info.serviceRunning) {
         _radioPrimaryAction = RadioServiceAction::Uninstall;
         _radioPrimaryButton->setText(tr("Disable"));
         _radioPrimaryButton->SetPrimary(false);
@@ -1272,7 +1251,6 @@ void SettingsWindow::RefreshRadioControl()
     _aapNoiseModeContainer->setEnabled(live && caps.SupportsNoiseControl());
     _aapNoiseControl->setEnabled(live && caps.SupportsNoiseControl());
     _aapConvAwarenessRow->setEnabled(live && caps.supportsConversationalAwareness);
-    _aapAdaptiveRow->setEnabled(live && caps.supportsAdaptiveAudio);
     _aapOneBudAncRow->setEnabled(live && caps.supportsNoiseCancellation);
     _aapPersonalizedVolRow->setEnabled(live && caps.supportsAdaptiveAudio);
     _aapLoudSoundRow->setEnabled(live && caps.supportsAdaptiveAudio);
@@ -1302,12 +1280,6 @@ void SettingsWindow::RefreshRadioControl()
         {
             const QSignalBlocker b{_aapConvAwareness};
             _aapConvAwareness->setChecked(nc.conversationalAwareness.value_or(false));
-        }
-        {
-            const QSignalBlocker b{_aapAdaptiveSlider};
-            const int lvl = static_cast<int>(nc.adaptiveNoiseLevel.value_or(50));
-            _aapAdaptiveSlider->setValue(lvl);
-            _aapAdaptiveValue->setText(QStringLiteral("%1%").arg(lvl));
         }
         {
             const QSignalBlocker b{_aapOneBudAnc};
@@ -1348,23 +1320,16 @@ void SettingsWindow::RefreshRadioControl()
         if (_aapHeartRateTelemetryRow != nullptr) {
             if (!caps.supportsHeartRate) {
                 _aapHeartRateTelemetryRow->SetDescription(
-                    tr("%1 does not include an optical heart rate sensor. Requires AirPods Pro 3 "
-                       "or Powerbeats Pro 2.")
-                        .arg(modelDisplay));
+                    tr("%1 does not include a heart rate sensor.").arg(modelDisplay));
             }
             else if (info.heartRateServiceId.has_value()) {
                 _aapHeartRateTelemetryRow->SetDescription(
-                    tr("%1 %2 RTBuddy Service %3 %4 Optical PPG 1 Hz")
-                        .arg(modelDisplay)
-                        .arg(QChar{0x00B7})
-                        .arg(info.heartRateServiceId.value())
-                        .arg(QChar{0x00B7}));
+                    tr("%1 %2 Optical sensor ready").arg(modelDisplay).arg(QChar{0x00B7}));
             }
             else {
-                _aapHeartRateTelemetryRow->SetDescription(
-                    tr("%1 %2 AAP L2CAP connected (discovering RTBuddy optical PPG sensor)")
-                        .arg(modelDisplay)
-                        .arg(QChar{0x00B7}));
+                _aapHeartRateTelemetryRow->SetDescription(tr("%1 %2 Initializing optical sensor...")
+                                                              .arg(modelDisplay)
+                                                              .arg(QChar{0x00B7}));
             }
         }
         {
@@ -1415,8 +1380,7 @@ void SettingsWindow::RefreshRadioControl()
         });
         if (_aapHeartRateTelemetryRow != nullptr) {
             _aapHeartRateTelemetryRow->SetDescription(
-                tr("Connect AirPods Pro 3 or Powerbeats Pro 2 with the Radio Proxy Service "
-                   "active."));
+                tr("Connect AirPods Pro 3 or Powerbeats Pro 2 to measure."));
         }
     }
 }
@@ -1428,43 +1392,39 @@ void SettingsWindow::RefreshAudioDevices()
 
 void SettingsWindow::RefreshLatencyDiagnostics()
 {
-    if (_latencyProfileRow == nullptr || _latencyModeButton == nullptr) {
+    if (_latencyProfileRow == nullptr || _latencyModeSegment == nullptr) {
         return;
     }
     if (!_latencyDiagnosticsProvider) {
-        _latencyModeButton->setEnabled(true);
+        _latencyModeSegment->setEnabled(true);
         return;
     }
 
     const auto diag = _latencyDiagnosticsProvider();
-    QStringList parts;
-    if (diag.aacEnabled) {
-        parts << tr("AAC (~220-280 ms)");
-    }
-    else if (!diag.enhancementsEnabled && diag.enginePeriodMs > 0.0 && diag.enginePeriodMs <= 5.0) {
-        parts << tr("SBC ultra-low latency (~80-115 ms)");
-    }
-    else {
-        parts << tr("SBC low-latency (~110-140 ms)");
-    }
-    parts << (diag.enhancementsEnabled ? tr("Enhancements on") : tr("Enhancements off"));
-    if (diag.enginePeriodMs > 0.0) {
-        parts << tr("%1 ms engine").arg(diag.enginePeriodMs, 0, 'f', 1);
-    }
-    if (diag.keepAliveActive) {
-        parts << tr("Stream awake");
+    {
+        const QSignalBlocker blocker{_latencyModeSegment};
+        _latencyModeSegment->SetCurrentIndex(diag.aacEnabled ? 0 : 1);
     }
 
-    _latencyProfileRow->SetDescription(parts.join(QStringLiteral(" \u00B7 ")));
-    _latencyTargetLowLatency = !diag.IsLowLatencyProfile();
     if (diag.applyingProfile) {
-        _latencyModeButton->setEnabled(false);
-        _latencyModeButton->setText(tr("Applying..."));
+        _latencyModeSegment->setEnabled(false);
+        _latencyProfileRow->SetDescription(tr("Switching audio mode..."));
+        return;
+    }
+
+    _latencyModeSegment->setEnabled(true);
+    if (diag.aacEnabled) {
+        _latencyProfileRow->SetDescription(tr("High-quality AAC active."));
+    }
+    else if (diag.enginePeriodMs > 0.0 && diag.enginePeriodMs <= 5.0) {
+        _latencyProfileRow->SetDescription(
+            QStringLiteral("%1 %2 %3")
+                .arg(tr("Low-latency SBC active"))
+                .arg(QChar{0x00B7})
+                .arg(tr("%1 ms engine").arg(diag.enginePeriodMs, 0, 'f', 1)));
     }
     else {
-        _latencyModeButton->setEnabled(true);
-        _latencyModeButton->setText(
-            _latencyTargetLowLatency ? tr("Gaming mode (SBC)") : tr("Music mode (AAC)"));
+        _latencyProfileRow->SetDescription(tr("Low-latency SBC active."));
     }
 }
 

@@ -91,7 +91,7 @@ void SetRepository(std::unique_ptr<Repository> repository);
     callback(uint32_t, volume_cap_level, {80},                                                     \
         Impl::Desc{QObject::tr("Maximum playback volume applied when AirPods connect.")})          \
     callback(bool, audio_keep_alive, {false},                                                      \
-        Impl::Desc{QObject::tr("Locks the AirPods Windows audio engine to its 3 ms minimum period and keeps the stream awake while worn so game sounds, clicks, and notifications start with minimal delay.")}) \
+        Impl::Desc{QObject::tr("Keeps the AirPods audio stream awake at low latency while worn.")}) \
     callback(QString, hotkey_toggle_connect, {},                                                   \
         Impl::Desc{QObject::tr("Global shortcut to connect or disconnect your AirPods from any app.")}) \
     callback(QString, hotkey_toggle_popup, {},                                                     \
@@ -100,12 +100,14 @@ void SetRepository(std::unique_ptr<Repository> repository);
         Impl::Desc{QObject::tr("Global shortcut to cycle Noise Control modes when two-way AAP control is active.")}) \
     callback(bool, native_toast_notifications, {true},                                             \
         Impl::Desc{QObject::tr("Uses Windows toast notifications when installed. Portable mode always uses tray alerts.")}) \
+    callback(bool, auto_enable_radio_service, {true},                                              \
+        Impl::Desc{QObject::tr("Starts the control engine automatically when AirpodsBridge opens. Turn off to enable it manually.")}) \
     callback(bool, radio_service_low_latency_qos, {true},                                          \
-        Impl::Desc{QObject::tr("Tightens AirPods Bluetooth ACL polling from 25 ms to 3.75 ms via the No-Test-Mode Radio Service for snappier controls and lower audio jitter.")}) \
+        Impl::Desc{QObject::tr("Reduces Bluetooth polling delay for faster response.")})           \
     callback(bool, radio_service_hfp_decline, {false},                                             \
-        Impl::Desc{QObject::tr("Declines AirPods Hands-Free RFCOMM links at the Bluetooth HCI layer so games and calls never drop stereo playback into muffled mono.")}) \
+        Impl::Desc{QObject::tr("Prevents apps from switching AirPods into mono call audio.")})     \
     callback(bool, radio_service_virtual_mic, {false},                                             \
-        Impl::Desc{QObject::tr("Exposes a stereo-safe virtual USB Audio Class 1.0 microphone via the Radio Service and Windows' built-in usbaudio driver.")}) \
+        Impl::Desc{QObject::tr("Adds a stereo-safe microphone while keeping stereo playback.")})   \
     callback(Appearance, appearance, {Appearance::System},                                         \
         Impl::Desc{QObject::tr("Light or dark. System follows the mode Windows is set to, and changes with it.")})
 // clang-format on

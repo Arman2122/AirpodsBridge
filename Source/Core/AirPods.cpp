@@ -75,6 +75,12 @@ bool IsRtBuddyFrame(std::span<const uint8_t> packet)
            packet[3] == 0x00 && packet[4] == 0x17 && packet[5] == 0x00;
 }
 
+bool IsHandshakeAckFrame(std::span<const uint8_t> packet)
+{
+    return packet.size() >= 6 && packet[0] == 0x01 && packet[1] == 0x00 && packet[2] == 0x04 &&
+           packet[3] == 0x00 && (packet[4] == 0x00 || packet[4] == 0x85);
+}
+
 } // namespace
 
 Manager::Manager(QObject *parent, std::unique_ptr<ControlTransport> controlTransport)
@@ -143,7 +149,7 @@ bool Manager::ShouldScan() const
     if (_deviceConnected) {
         return _boundDevice.has_value();
     }
-    return _scanWhileDisconnected || _showNearbyWhenDisconnected;
+    return _scanWhileDisconnected || _showNearbyWhenDisconnected || _showPopupOnLidOpen;
 }
 
 void Manager::ReconcileScannerLater()
@@ -307,6 +313,19 @@ void Manager::SetShowNearbyWhenDisconnected(bool enable)
     ReconcileScannerLater();
 }
 
+void Manager::SetShowPopupOnLidOpen(bool enable)
+{
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (_showPopupOnLidOpen == enable) {
+            return;
+        }
+        _showPopupOnLidOpen = enable;
+    }
+    LOG(Info, "Show popup on lid open: {}", enable);
+    ReconcileScannerLater();
+}
+
 bool Manager::SendAapControl(
     std::vector<uint8_t> packet, std::optional<Aap::InboundMessage> optimisticMsg,
     std::vector<uint8_t> followUpPacket)
@@ -345,7 +364,9 @@ bool Manager::SetNoiseControlMode(NoiseControlMode mode)
     bool connected = false;
     bool supportsAllowOff = false;
     bool needAllowOffFirst = false;
+    bool needFeaturesFirst = false;
     uint64_t offEpoch = 0;
+    uint64_t adaptiveEpoch = 0;
     PendingStateSignals pending;
 
     {
@@ -364,6 +385,10 @@ bool Manager::SetNoiseControlMode(NoiseControlMode mode)
             const auto now = std::chrono::steady_clock::now();
             offEpoch = ++_pendingOffModeEpoch;
             _offModeRetrySent = false;
+            ++_pendingAdaptiveEpoch;
+            _pendingAdaptiveUntil = {};
+            _adaptiveRequestedAt = {};
+            _adaptiveRetrySent = false;
             _userDisabledAllowOff = false;
             needAllowOffFirst = !_allowOffSentToDevice || !state.has_value() ||
                                 state->noiseControl.allowOffListeningMode != std::optional{true};
@@ -389,11 +414,34 @@ bool Manager::SetNoiseControlMode(NoiseControlMode mode)
                 pending = PrepareStateChangedLocked(std::move(u2.value()));
             }
         }
+        else if (mode == NoiseControlMode::Adaptive) {
+            const auto now = std::chrono::steady_clock::now();
+            ++_pendingOffModeEpoch;
+            _pendingOffModeUntil = {};
+            _pendingOffModeSendAt = {};
+            _offModeRetrySent = false;
+            adaptiveEpoch = ++_pendingAdaptiveEpoch;
+            _adaptiveRetrySent = false;
+            _adaptiveRequestedAt = now;
+            needFeaturesFirst = !_aapFeaturesEnabledSent;
+            _aapFeaturesEnabledSent = true;
+            _pendingAdaptiveUntil = now + std::chrono::milliseconds{needFeaturesFirst ? 1100 : 900};
+            if (auto u = _stateMgr.OnAapMessage(
+                    Aap::NoiseControlNotification{.mode = NoiseControlMode::Adaptive}, _boundModel);
+                u.has_value())
+            {
+                pending = PrepareStateChangedLocked(std::move(u.value()));
+            }
+        }
         else {
             ++_pendingOffModeEpoch;
             _pendingOffModeUntil = {};
             _pendingOffModeSendAt = {};
             _offModeRetrySent = false;
+            ++_pendingAdaptiveEpoch;
+            _pendingAdaptiveUntil = {};
+            _adaptiveRequestedAt = {};
+            _adaptiveRetrySent = false;
         }
     }
 
@@ -424,6 +472,36 @@ bool Manager::SetNoiseControlMode(NoiseControlMode mode)
         }
         else {
             _controlTransport->SendPacket(Aap::BuildSetNoiseControlPacket(NoiseControlMode::Off));
+        }
+        return true;
+    }
+
+    if (mode == NoiseControlMode::Adaptive) {
+        EmitStateSignals(pending);
+        if (needFeaturesFirst) {
+            LOG(Info, "AAP: enabling H2 features (0x4D) before switching to Adaptive.");
+            _controlTransport->SendPacket(Aap::BuildEnableFeaturesPacket());
+            QMetaObject::invokeMethod(
+                this,
+                [this, adaptiveEpoch] {
+                    QTimer::singleShot(140, this, [this, adaptiveEpoch] {
+                        {
+                            std::lock_guard<std::mutex> lock{_mutex};
+                            if (!_aapConnected || _pendingAdaptiveEpoch != adaptiveEpoch ||
+                                !_controlTransport->IsConnected())
+                            {
+                                return;
+                            }
+                        }
+                        _controlTransport->SendPacket(
+                            Aap::BuildSetNoiseControlPacket(NoiseControlMode::Adaptive));
+                    });
+                },
+                Qt::QueuedConnection);
+        }
+        else {
+            _controlTransport->SendPacket(
+                Aap::BuildSetNoiseControlPacket(NoiseControlMode::Adaptive));
         }
         return true;
     }
@@ -516,9 +594,50 @@ bool Manager::SetLoudSoundReduction(bool enabled)
 
 bool Manager::SetAdaptiveNoiseLevel(uint8_t level)
 {
-    return SendAapControl(
-        Aap::BuildSetAdaptiveNoiseLevelPacket(level),
-        Aap::AdaptiveNoiseLevelNotification{.level = level});
+    const uint8_t clamped = std::min<uint8_t>(level, 100);
+    bool deferForModeSwitch = false;
+    uint64_t levelEpoch = 0;
+    PendingStateSignals pending;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_aapConnected || !_deviceConnected || !_controlTransport->IsConnected()) {
+            return false;
+        }
+        levelEpoch = ++_adaptiveLevelEpoch;
+        const auto now = std::chrono::steady_clock::now();
+        deferForModeSwitch = _adaptiveRequestedAt != std::chrono::steady_clock::time_point{} &&
+                             now - _adaptiveRequestedAt < std::chrono::milliseconds{220};
+        if (auto u = _stateMgr.OnAapMessage(
+                Aap::AdaptiveNoiseLevelNotification{.level = clamped}, _boundModel);
+            u.has_value())
+        {
+            pending = PrepareStateChangedLocked(std::move(u.value()));
+        }
+    }
+
+    EmitStateSignals(pending);
+
+    if (deferForModeSwitch) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, levelEpoch, clamped] {
+                QTimer::singleShot(180, this, [this, levelEpoch, clamped] {
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_aapConnected || _adaptiveLevelEpoch != levelEpoch ||
+                            !_controlTransport->IsConnected())
+                        {
+                            return;
+                        }
+                    }
+                    _controlTransport->SendPacket(Aap::BuildSetAdaptiveNoiseLevelPacket(clamped));
+                });
+            },
+            Qt::QueuedConnection);
+        return true;
+    }
+
+    return _controlTransport->SendPacket(Aap::BuildSetAdaptiveNoiseLevelPacket(clamped));
 }
 
 bool Manager::SetHeadGestures(bool enabled)
@@ -1004,11 +1123,17 @@ void Manager::OnControlConnectionChanged(bool connected)
         _rtBuddySeq = 0;
         _heartRateWarmupLogged = false;
         _lastLoggedBpm.reset();
+        _aapFeaturesEnabledSent = false;
         _allowOffSentToDevice = false;
         _pendingOffModeUntil = {};
         _pendingOffModeSendAt = {};
         _offModeRetrySent = false;
         ++_pendingOffModeEpoch;
+        _pendingAdaptiveUntil = {};
+        _adaptiveRequestedAt = {};
+        _adaptiveRetrySent = false;
+        ++_pendingAdaptiveEpoch;
+        ++_adaptiveLevelEpoch;
         epoch = ++_heartRateEpoch;
 
         if (connected && !_deviceConnected) {
@@ -1035,76 +1160,20 @@ void Manager::OnControlConnectionChanged(bool connected)
 
     if (shouldHandshake) {
         LOG(Info, "AAP control transport connected; starting handshake.");
+        // Send ONLY the AAP handshake first. Sending 0x4D (EnableFeatures) and 0x0F
+        // (RequestNotifications) before AirPods reply with the Handshake ACK (01 00 04 00 00 00)
+        // causes AirPods Pro 2/3 to drop both frames — delaying metadata/modes by 30 s and
+        // causing Adaptive (0x04) requests to fall back to Off (0x01).
         _controlTransport->SendPacket(Aap::BuildHandshakePacket());
-        _controlTransport->SendPacket(Aap::BuildEnableFeaturesPacket());
-        _controlTransport->SendPacket(Aap::BuildRequestNotificationsPacket());
 
-        // Ask AirPods Pro 3 to announce all RTBuddy sensor HID descriptors (so dynamic heart-rate
-        // service IDs are discovered cleanly across firmware updates).
+        // Fallback timer (220 ms) in case the L2CAP channel was already handshaked by an earlier
+        // app session and AirPods do not send a fresh Handshake ACK.
         QMetaObject::invokeMethod(
             this,
             [this, epoch, resumeHeartRate] {
-                QTimer::singleShot(500, this, [this, epoch] {
-                    std::vector<uint8_t> req;
-                    {
-                        std::lock_guard<std::mutex> lock{_mutex};
-                        if (!_aapConnected || _heartRateEpoch != epoch ||
-                            !_controlTransport->IsConnected())
-                        {
-                            return;
-                        }
-                        req = RtBuddy::BuildRequestAllDescriptorsPacket(NextRtBuddySeqLocked());
-                    }
-                    _controlTransport->SendPacket(req);
+                QTimer::singleShot(220, this, [this, epoch, resumeHeartRate] {
+                    CompleteAapPostHandshake(epoch, resumeHeartRate);
                 });
-                // Proactively arm Allow "Off" Listening Mode (0x34) once per session on models
-                // that gate Off behind it (AirPods Pro 2/3, AirPods 4 ANC, AirPods 5), unless
-                // the user explicitly disabled it, so Listening Off responds immediately.
-                QTimer::singleShot(650, this, [this, epoch] {
-                    bool shouldArmAllowOff = false;
-                    PendingStateSignals armPending;
-                    {
-                        std::lock_guard<std::mutex> lock{_mutex};
-                        if (!_aapConnected || _heartRateEpoch != epoch || _userDisabledAllowOff ||
-                            _allowOffSentToDevice || !_controlTransport->IsConnected())
-                        {
-                            return;
-                        }
-                        const auto st = _stateMgr.GetCurrentState();
-                        const Model model =
-                            st.has_value() && st->model != Model::Unknown ? st->model : _boundModel;
-                        if (CapabilitiesFor(model).supportsAllowOffMode) {
-                            shouldArmAllowOff = true;
-                            _allowOffSentToDevice = true;
-                            if (auto u = _stateMgr.OnAapMessage(
-                                    Aap::FeatureToggleNotification{
-                                        .feature = Aap::ToggleFeature::AllowOffListeningMode,
-                                        .enabled = true},
-                                    _boundModel);
-                                u.has_value())
-                            {
-                                armPending = PrepareStateChangedLocked(std::move(u.value()));
-                            }
-                        }
-                    }
-                    if (shouldArmAllowOff) {
-                        LOG(Info, "AAP: arming Allow \"Off\" Listening Mode (0x34) for session.");
-                        _controlTransport->SendPacket(
-                            Aap::BuildSetAllowOffListeningModePacket(true));
-                        EmitStateSignals(armPending);
-                    }
-                });
-                if (resumeHeartRate) {
-                    QTimer::singleShot(900, this, [this, epoch] {
-                        {
-                            std::lock_guard<std::mutex> lock{_mutex};
-                            if (!_aapConnected || !_heartRateWanted || _heartRateEpoch != epoch) {
-                                return;
-                            }
-                        }
-                        StartHeartRateCampaignLater(true);
-                    });
-                }
             },
             Qt::QueuedConnection);
     }
@@ -1126,8 +1195,117 @@ void Manager::OnControlConnectionChanged(bool connected)
     ReconcileScannerLater();
 }
 
+void Manager::CompleteAapPostHandshake(uint64_t epoch, bool resumeHeartRate)
+{
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (!_aapConnected || _heartRateEpoch != epoch || _aapFeaturesEnabledSent ||
+            !_controlTransport->IsConnected())
+        {
+            return;
+        }
+        _aapFeaturesEnabledSent = true;
+    }
+
+    LOG(Info, "AAP handshake acknowledged; enabling H2 features (0x4D) and notifications (0x0F).");
+    _controlTransport->SendPacket(Aap::BuildEnableFeaturesPacket());
+
+    QMetaObject::invokeMethod(
+        this,
+        [this, epoch, resumeHeartRate] {
+            QTimer::singleShot(80, this, [this, epoch] {
+                {
+                    std::lock_guard<std::mutex> lock{_mutex};
+                    if (!_aapConnected || _heartRateEpoch != epoch ||
+                        !_controlTransport->IsConnected()) {
+                        return;
+                    }
+                }
+                _controlTransport->SendPacket(Aap::BuildRequestNotificationsPacket());
+            });
+            // Ask AirPods Pro 3 / Powerbeats Pro 2 to announce all RTBuddy sensor HID descriptors.
+            QTimer::singleShot(320, this, [this, epoch] {
+                std::vector<uint8_t> req;
+                {
+                    std::lock_guard<std::mutex> lock{_mutex};
+                    if (!_aapConnected || _heartRateEpoch != epoch ||
+                        !_controlTransport->IsConnected()) {
+                        return;
+                    }
+                    req = RtBuddy::BuildRequestAllDescriptorsPacket(NextRtBuddySeqLocked());
+                }
+                _controlTransport->SendPacket(req);
+            });
+            // Proactively arm Allow "Off" Listening Mode (0x34) once per session on models that
+            // gate Off behind it (AirPods Pro 2/3, AirPods 4 ANC, AirPods 5) unless disabled.
+            QTimer::singleShot(480, this, [this, epoch] {
+                bool shouldArmAllowOff = false;
+                PendingStateSignals armPending;
+                {
+                    std::lock_guard<std::mutex> lock{_mutex};
+                    if (!_aapConnected || _heartRateEpoch != epoch || _userDisabledAllowOff ||
+                        _allowOffSentToDevice || !_controlTransport->IsConnected())
+                    {
+                        return;
+                    }
+                    const auto st = _stateMgr.GetCurrentState();
+                    const Model model =
+                        st.has_value() && st->model != Model::Unknown ? st->model : _boundModel;
+                    if (CapabilitiesFor(model).supportsAllowOffMode) {
+                        shouldArmAllowOff = true;
+                        _allowOffSentToDevice = true;
+                        if (auto u = _stateMgr.OnAapMessage(
+                                Aap::FeatureToggleNotification{
+                                    .feature = Aap::ToggleFeature::AllowOffListeningMode,
+                                    .enabled = true},
+                                _boundModel);
+                            u.has_value())
+                        {
+                            armPending = PrepareStateChangedLocked(std::move(u.value()));
+                        }
+                    }
+                }
+                if (shouldArmAllowOff) {
+                    LOG(Info, "AAP: arming Allow \"Off\" Listening Mode (0x34) for session.");
+                    _controlTransport->SendPacket(Aap::BuildSetAllowOffListeningModePacket(true));
+                    EmitStateSignals(armPending);
+                }
+            });
+            if (resumeHeartRate) {
+                QTimer::singleShot(750, this, [this, epoch] {
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_aapConnected || !_heartRateWanted || _heartRateEpoch != epoch) {
+                            return;
+                        }
+                    }
+                    StartHeartRateCampaignLater(true);
+                });
+            }
+        },
+        Qt::QueuedConnection);
+}
+
 void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
 {
+    if (IsHandshakeAckFrame(packet)) {
+        uint64_t epoch = 0;
+        bool resumeHr = false;
+        bool triggerPostHandshake = false;
+        {
+            std::lock_guard<std::mutex> lock{_mutex};
+            if (_aapConnected && !_aapFeaturesEnabledSent) {
+                epoch = _heartRateEpoch;
+                resumeHr = _heartRateWanted;
+                triggerPostHandshake = true;
+            }
+        }
+        if (triggerPostHandshake) {
+            CompleteAapPostHandshake(epoch, resumeHr);
+        }
+        return;
+    }
+
     // 1. Feed every packet through the RTBuddy 0x17 SensorDataWX reassembler & stateful parser.
     bool mappingChanged = false;
     std::optional<uint8_t> discoveredHeart;
@@ -1243,7 +1421,7 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
                     }
                     hex += std::format("{:02X}", packet[i]);
                 }
-                LOG(Info, "AAP unhandled frame (len={}, opcode=0x{:02X}): {}", packet.size(),
+                LOG(Trace, "AAP unhandled frame (len={}, opcode=0x{:02X}): {}", packet.size(),
                     opcode, hex);
             }
         }
@@ -1257,6 +1435,8 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
     bool resumeHrForEar = false;
     bool retryOffMode = false;
     uint64_t retryOffEpoch = 0;
+    bool retryAdaptiveMode = false;
+    uint64_t retryAdaptiveEpoch = 0;
     uint8_t retryCycleMask = ListeningCycleBit::kOff | ListeningCycleBit::kNoiseCancellation |
                              ListeningCycleBit::kTransparency | ListeningCycleBit::kAdaptive;
     PendingStateSignals pending;
@@ -1268,10 +1448,25 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
         bool suppressNoiseEcho = false;
         if (const auto *ncMsg = std::get_if<Aap::NoiseControlNotification>(&message.value())) {
             const auto now = std::chrono::steady_clock::now();
+            if (ncMsg->mode == NoiseControlMode::Adaptive) {
+                _pendingAdaptiveUntil = {};
+                _adaptiveRetrySent = false;
+            }
             if (ncMsg->mode == NoiseControlMode::Off) {
                 _pendingOffModeUntil = {};
                 _pendingOffModeSendAt = {};
                 _offModeRetrySent = false;
+                if (_pendingAdaptiveUntil != std::chrono::steady_clock::time_point{} &&
+                    now < _pendingAdaptiveUntil && !_adaptiveRetrySent)
+                {
+                    // AirPods rejected Adaptive and fell back to Off because H2 features (0x4D)
+                    // had not settled yet. Re-send 0x4D and retry Adaptive once after 180 ms.
+                    _adaptiveRetrySent = true;
+                    retryAdaptiveEpoch = ++_pendingAdaptiveEpoch;
+                    _pendingAdaptiveUntil = now + std::chrono::milliseconds{1100};
+                    retryAdaptiveMode = true;
+                    suppressNoiseEcho = true;
+                }
             }
             else if (
                 _pendingOffModeUntil != std::chrono::steady_clock::time_point{} &&
@@ -1394,6 +1589,29 @@ void Manager::OnControlPacketReceived(std::span<const uint8_t> packet)
                     }
                     _controlTransport->SendPacket(
                         Aap::BuildSetNoiseControlPacket(NoiseControlMode::Off));
+                });
+            },
+            Qt::QueuedConnection);
+    }
+
+    if (retryAdaptiveMode) {
+        LOG(Info, "AAP: AirPods fell back to Off from Adaptive; re-sending H2 features (0x4D) and "
+                  "retrying Adaptive in 180 ms.");
+        _controlTransport->SendPacket(Aap::BuildEnableFeaturesPacket());
+        QMetaObject::invokeMethod(
+            this,
+            [this, retryAdaptiveEpoch] {
+                QTimer::singleShot(180, this, [this, retryAdaptiveEpoch] {
+                    {
+                        std::lock_guard<std::mutex> lock{_mutex};
+                        if (!_aapConnected || _pendingAdaptiveEpoch != retryAdaptiveEpoch ||
+                            !_controlTransport->IsConnected())
+                        {
+                            return;
+                        }
+                    }
+                    _controlTransport->SendPacket(
+                        Aap::BuildSetNoiseControlPacket(NoiseControlMode::Adaptive));
                 });
             },
             Qt::QueuedConnection);
@@ -1658,14 +1876,24 @@ auto Manager::PrepareStateChangedLocked(Details::StateManager::UpdateEvent updat
     PendingStateSignals pending;
     pending.state = newState;
 
-    const bool newLidOpened = newState.caseBox.isLidOpened && newState.caseBox.isBothPodsInCase;
+    const auto isLidOpenForPopup = [](const State &st) {
+        if (!st.caseBox.isLidOpened) {
+            return false;
+        }
+        if (st.batteryPrecision == BatteryPrecision::ExactPercent) {
+            // Over AAP, Case battery only becomes active while the charging case lid is open.
+            return true;
+        }
+        return st.caseBox.isBothPodsInCase || st.caseBox.battery.Available();
+    };
+
+    const bool newLidOpened = isLidOpenForPopup(newState);
     bool lidStateSwitched;
     if (!oldState.has_value()) {
         lidStateSwitched = newLidOpened;
     }
     else {
-        const bool oldLidOpened =
-            oldState->caseBox.isLidOpened && oldState->caseBox.isBothPodsInCase;
+        const bool oldLidOpened = isLidOpenForPopup(oldState.value());
         lidStateSwitched = oldLidOpened != newLidOpened;
     }
     if (lidStateSwitched) {
@@ -1698,7 +1926,7 @@ bool Manager::OnAdvertisementReceived(const Bluetooth::AdvertisementWatcher::Rec
     {
         std::lock_guard<std::mutex> lock{_mutex};
         if (!_deviceConnected) {
-            if (_scanWhileDisconnected || _showNearbyWhenDisconnected) {
+            if (_scanWhileDisconnected || _showNearbyWhenDisconnected || _showPopupOnLidOpen) {
                 pendingNearby = OnAdvertisementWhileDisconnectedLocked(adv);
             }
             else {
@@ -1763,7 +1991,7 @@ auto Manager::OnAdvertisementWhileDisconnectedLocked(const Details::Advertisemen
         out.lidOpenedNearby = true;
     }
 
-    if (!_showNearbyWhenDisconnected) {
+    if (!_showNearbyWhenDisconnected && !(_showPopupOnLidOpen && caseLidOpen)) {
         return out;
     }
 

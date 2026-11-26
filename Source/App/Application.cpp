@@ -99,6 +99,7 @@ void ApbApplication::InitSettings(Core::Settings::LoadResult loadResult)
 
 void ApbApplication::FirstTimeUse()
 {
+    _firstTimeSetupRan = true;
     bool serviceAlreadyRunning = false;
 #if defined APB_OS_WIN
     serviceAlreadyRunning = Core::AirPods::ServiceControlTransport::IsServiceRunning();
@@ -111,6 +112,7 @@ void ApbApplication::FirstTimeUse()
     auto current = Core::Settings::GetCurrent();
     current.auto_run = res.autoRun;
     current.show_nearby_popup_when_disconnected = res.showNearbyPopup;
+    current.auto_enable_radio_service = res.controlEngineEnabled;
     Core::Settings::Save(std::move(current));
 
     if (res.controlEngineEnabled) {
@@ -121,11 +123,82 @@ void ApbApplication::FirstTimeUse()
     if (res.rebootRequired) {
         QMessageBox::information(
             nullptr, Config::ProgramName,
-            tr("The No-Test-Mode Control Engine was installed.\n\n"
-               "Restart Windows once so the signed usbip-win2 driver finishes initializing."));
+            tr("The Control Engine was installed.\n\n"
+               "Restart Windows once so the driver finishes initializing."));
     }
 
     _trayWelcomePending = true;
+}
+
+void ApbApplication::EnsureRadioServiceEnabledOnStart()
+{
+#if defined APB_OS_WIN
+    if (!_autoEnableRadioService || _autoEnableRadioAttempted) {
+        return;
+    }
+    _autoEnableRadioAttempted = true;
+
+    const auto snap = _airPodsManager->GetDiagnostics();
+    if (snap.radioServiceInfo.has_value() && snap.radioServiceInfo->guardTripped) {
+        LOG(Info, "Control engine safety guard tripped; skipping automatic start.");
+        return;
+    }
+
+    if (Core::AirPods::ServiceControlTransport::IsServiceRunning()) {
+        _airPodsManager->ReconnectControlTransport();
+        _trayIcon->NotifyRadioControlChanged();
+        return;
+    }
+
+    LOG(Info, "Control engine is not running and auto-enable is on; starting setup.");
+    _trayIcon->SetRadioSetupBusy(true, tr("Starting control engine..."));
+    Core::AirPods::ServiceControlTransport::RunElevatedSetupAsync(
+        false, false,
+        [this](Core::AirPods::ServiceControlTransport::SetupOutcome outcome) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, outcome = std::move(outcome)]() {
+                    if (outcome.succeeded) {
+                        _quickConnect->InvalidateCache();
+                        _trayIcon->SetRadioSetupBusy(false);
+                        const auto reconcile = [this] {
+                            _quickConnect->InvalidateCache();
+                            _quickConnect->RefreshDevices();
+                            _airPodsManager->RebindAfterRadioChange();
+                            const auto f = Core::Settings::GetCurrent();
+                            _airPodsManager->ApplyRadioProxyOptions(
+                                Core::AirPods::RadioProxyOptions{
+                                    .lowLatencyQos = f.radio_service_low_latency_qos,
+                                    .pollLatencyUs = 3750,
+                                    .declineHfp = f.radio_service_hfp_decline,
+                                    .virtualMicEnabled = f.radio_service_virtual_mic,
+                                });
+                            _airPodsManager->ReconnectControlTransport();
+                            _trayIcon->NotifyRadioControlChanged();
+                        };
+                        QTimer::singleShot(2500, this, reconcile);
+                        QTimer::singleShot(5500, this, [this] {
+                            _airPodsManager->ReconnectControlTransport();
+                            _trayIcon->NotifyRadioControlChanged();
+                        });
+                    }
+                    else {
+                        _trayIcon->SetRadioSetupBusy(false);
+                        LOG(Info, "Auto-enable control engine did not complete: {}",
+                            outcome.message);
+                    }
+                },
+                Qt::QueuedConnection);
+        },
+        [this](int percent, std::string message) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, percent, msg = QString::fromStdString(message)]() {
+                    _trayIcon->SetRadioSetupProgress(percent, msg);
+                },
+                Qt::QueuedConnection);
+        });
+#endif
 }
 
 void ApbApplication::ShowTrayWelcome()
@@ -253,6 +326,10 @@ bool ApbApplication::Prepare(int argc, char *argv[])
     _taskbarStatus->Unavailable();
 
     InitSettings(settingsLoadResult);
+
+    if (!_firstTimeSetupRan && _autoEnableRadioService) {
+        QTimer::singleShot(700, this, [this] { EnsureRadioServiceEnabledOnStart(); });
+    }
 
     // After the installer, and on the first run, the program says where it went. Anyone
     // who already has settings and starts it by hand knows.
@@ -607,45 +684,40 @@ void ApbApplication::ConnectGuiComponents()
             info.serviceRunning = rs.serviceRunning;
             info.guardTripped = rs.guardTripped;
             if (rs.guardTripped) {
-                info.engineDetail =
-                    tr("Safety guard tripped after repeated takeover failures. Your native "
-                       "Windows Bluetooth driver has been restored automatically.");
+                info.engineDetail = QStringLiteral("%1 %2 %3")
+                                        .arg(tr("Paused after repeated errors"))
+                                        .arg(QChar{0x00B7})
+                                        .arg(tr("Native driver restored"));
             }
             else if (rs.serviceRunning && rs.virtualAdapterAttached) {
                 info.engineDetail =
-                    tr("Active (WinUSB + signed usbip-win2, Secure Boot ON). %1 AAP channel(s) "
-                       "open · %2 ms poll latency.")
-                        .arg(rs.activeAapChannels)
-                        .arg(rs.activePollLatencyUs / 1000.0, 0, 'f', 2);
+                    QStringLiteral("%1 %2 %3")
+                        .arg(tr("Active"))
+                        .arg(QChar{0x00B7})
+                        .arg(rs.activeAapChannels > 0 ? tr("Connected") : tr("Ready"));
             }
             else if (rs.serviceRunning) {
-                info.engineDetail = QString::fromStdString(rs.detail);
+                info.engineDetail = tr("Starting...");
             }
             else if (rs.serviceInstalled) {
-                info.engineDetail =
-                    tr("Installed, but AirpodsBridgeService is stopped. Start it or click Enable.");
+                info.engineDetail = tr("Stopped");
             }
             else {
                 info.engineDetail =
-                    tr("Not enabled. Uses built-in WinUSB + Microsoft-signed usbip-win2 for full "
-                       "two-way AirPods controls without Test Mode.");
+                    QStringLiteral("%1 %2 %3")
+                        .arg(tr("Off"))
+                        .arg(QChar{0x00B7})
+                        .arg(tr("Enables noise control, 1% battery, and heart rate."));
             }
 
             if (!rs.adapterDisplayName.empty()) {
-                info.adapterSummary = QStringLiteral("%1 (VID %2 / PID %3) \u00B7 %4")
-                                          .arg(
-                                              QString::fromStdString(rs.adapterDisplayName),
-                                              QStringLiteral("%1")
-                                                  .arg(rs.adapterVid, 4, 16, QLatin1Char('0'))
-                                                  .toUpper(),
-                                              QStringLiteral("%1")
-                                                  .arg(rs.adapterPid, 4, 16, QLatin1Char('0'))
-                                                  .toUpper(),
-                                              rs.winUsbBound ? tr("Proxied via WinUSB")
-                                                             : tr("Native Windows driver"));
+                info.adapterSummary = QStringLiteral("%1 %2 %3")
+                                          .arg(QString::fromStdString(rs.adapterDisplayName))
+                                          .arg(QChar{0x00B7})
+                                          .arg(rs.winUsbBound ? tr("Active") : tr("Native driver"));
             }
             else {
-                info.adapterSummary = tr("Standard Windows Bluetooth driver is active.");
+                info.adapterSummary = tr("Standard Windows driver");
             }
         }
         return info;
@@ -850,8 +922,10 @@ void ApbApplication::WireSettings()
         Watch(&Fields::auto_run, [this](bool enable) { _autoStartService->SetEnabled(enable); }));
     _settingsWatches.push_back(
         Watch(&Fields::check_for_updates, [this](bool enable) { SetUpdateCheckEnabled(enable); }));
-    _settingsWatches.push_back(Watch(
-        &Fields::show_popup_on_lid_open, [this](bool enable) { _showPopupOnLidOpen = enable; }));
+    _settingsWatches.push_back(Watch(&Fields::show_popup_on_lid_open, [this, manager](bool enable) {
+        _showPopupOnLidOpen = enable;
+        manager->SetShowPopupOnLidOpen(enable);
+    }));
     _settingsWatches.push_back(
         Watch(&Fields::show_nearby_popup_when_disconnected, [manager](bool enable) {
             manager->SetShowNearbyWhenDisconnected(enable);
@@ -953,6 +1027,9 @@ void ApbApplication::WireSettings()
     }));
 
     // No-Test-Mode Radio Service proxy options
+    _settingsWatches.push_back(Watch(&Fields::auto_enable_radio_service, [this](bool enable) {
+        _autoEnableRadioService = enable;
+    }));
     auto pushRadioOptions = [manager] {
         const auto f = Core::Settings::GetCurrent();
         manager->ApplyRadioProxyOptions(Core::AirPods::RadioProxyOptions{
