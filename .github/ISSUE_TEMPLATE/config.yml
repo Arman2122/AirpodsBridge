@@ -6,6 +6,3 @@ contact_links:
   - name: Ask a question
     url: https://github.com/Arman2122/AirpodsBridge/discussions/categories/q-a
     about: Get help with setup, configuration, or building from source.
-  - name: Security vulnerability
-    url: https://github.com/Arman2122/AirpodsBridge/security/advisories/new
-    about: Send a private vulnerability report to the maintainers.
