@@ -76,15 +76,26 @@ jobs:
           git clone https://github.com/microsoft/vcpkg.git Build/vcpkg
           & Build/vcpkg/bootstrap-vcpkg.bat -disableMetrics
 
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/Build/vcpkg-cache
+          key: vcpkg-win32-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-win32-
+
       - name: Configure
+        env:
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/Build/vcpkg-cache
         run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           cmake -S . -B Build/Release `
             -G 'Visual Studio 17 2022' `
             -A Win32 `
             -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/Build/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR `
             -DAPB_BUILD_TESTS=ON `
-            -DAPB_GENERATE_INSTALLER=ON `
+            -DAPB_GENERATE_INSTALLER=OFF `
             -DAPB_GITHUB_OWNER=${{ github.repository_owner }} `
             -DAPB_GITHUB_REPOSITORY=${{ github.event.repository.name }} `
             -DAPB_BUILD_GIT_HASH=${{ github.sha }}
@@ -92,15 +103,76 @@ jobs:
       - name: Build
         run: cmake --build Build/Release --config $env:BUILD_TYPE --parallel 2
 
+      - name: Build No-Test-Mode Radio Service (x64)
+        run: |
+          cmake -S Service -B Build/ServiceRelease -G 'Visual Studio 17 2022' -A x64
+          cmake --build Build/ServiceRelease --config $env:BUILD_TYPE --parallel 2
+          Copy-Item Build/ServiceRelease/Binary/AirpodsBridgeService.exe Build/Release/Binary/AirpodsBridgeService.exe -Force
+          Copy-Item Tools/Setup-RadioService.ps1 Build/Release/Binary/Setup-RadioService.ps1 -Force
+
       - name: Test
         run: |
           $env:PATH = "$env:QT_ROOT_DIR/bin;$env:PATH"
           ctest --test-dir Build/Release -C $env:BUILD_TYPE --output-on-failure
 
+      - name: Sign application executable when a certificate is configured
+        if: github.ref_type == 'tag'
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_PASSWORD)
+          if (-not $hasCertificate -and -not $hasPassword) {
+            Write-Warning 'Code-signing secrets are not configured; packaging an unsigned executable.'
+            exit 0
+          }
+          if (-not $hasCertificate -or -not $hasPassword) {
+            throw 'Both Windows code-signing secrets must be configured together.'
+          }
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'AirpodsBridge-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes(
+              $certificatePath,
+              [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
+            )
+            $signTool = Get-ChildItem `
+              "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x86/signtool.exe" |
+              Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+              Select-Object -First 1
+            if (-not $signTool) {
+              throw 'signtool.exe was not found on the runner.'
+            }
+
+            $exePath = 'Build/Release/Binary/AirpodsBridge.exe'
+            & $signTool.FullName sign `
+              /fd SHA256 `
+              /td SHA256 `
+              /tr http://timestamp.digicert.com `
+              /f $certificatePath `
+              /p $env:SIGNING_CERTIFICATE_PASSWORD `
+              $exePath
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool sign (exe) failed with exit code $LASTEXITCODE."
+            }
+
+            & $signTool.FullName verify /pa /v $exePath
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool verify (exe) failed with exit code $LASTEXITCODE."
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Package release assets
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          cmake -DAPB_GENERATE_INSTALLER=ON Build/Release
+          cpack --config Build/Release/CPackConfig.cmake -C $env:BUILD_TYPE
+
           $installer = Get-ChildItem `
             Build/Release/Installer/AirpodsBridge-*-win32.exe |
             Select-Object -First 1

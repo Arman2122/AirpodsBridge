@@ -173,16 +173,63 @@ and `Source/Gui/Utils.h` both exist.
 
 Third-party and generated headers keep angle brackets (`<QObject>`, `<Config.h>`).
 
-## Known wart
+## Two-way control seam (AAP L2CAP)
 
-`Source/Domain/AirPodsAdvertisement.h` includes `Source/Core/Bluetooth.h` to borrow the
-`AdvertisementWatcher::ReceivedData` value type. That is a domain header naming a core
-header, against the direction above.
+BLE proximity-pairing advertisements are broadcast-only and report battery in 10% buckets.
+Two-way capabilities -- 1% battery, Noise Cancellation / Transparency / Adaptive Audio
+switching, Conversational Awareness, One-Bud ANC, Personalized Volume, Head Gestures, and
+metadata -- travel over Apple's Accessory Protocol (AAP) on BR/EDR L2CAP (PSM `0x1001`; see
+`Tools/AapSdpDump.cpp`).
 
-It links because `ReceivedData` is a plain data type declared in a header, with the watcher
-itself implemented in `apb_core`. Nothing in `apb_domain` calls into the platform. Removing
-the include means extracting the received-data type into its own header, which is a change
-to the Bluetooth abstraction rather than a move, so it is recorded here instead of hidden.
+The full protocol, user-mode transport, and optional KMDF driver are in place across every
+layer:
+
+- **`Source/Domain/AapProtocol.h`** encodes and decodes AAP frames with explicit bounds
+  checks and merges them into `Core::AirPods::State`, gated by per-model
+  `Core::AirPods::CapabilitiesFor(model)`.
+- **`Source/Core/AirPodsTransport.h`** defines `Core::AirPods::ControlTransport`, with
+  `Core::AirPods::CompositeControlTransport` preferring the No-Test-Mode
+  `ServiceControlTransport` (`Source/Core/AirPodsServiceTransport_win.cpp`, talking to
+  the native x64 `AirpodsBridgeService` over `\\.\pipe\AirpodsBridge.RadioService.v1`
+  using Windows' inbox WinUSB + Microsoft-signed `usbip-win2` + user-mode HCI/L2CAP MITM
+  proxy; see [RadioService](RadioService.md)) and transparently falling back to
+  `Core::AirPods::L2capControlTransport` (`Source/Core/AirPodsTransport_win.cpp`) watching
+  `GUID_DEVINTERFACE_APB_AAP` via `CM_Register_Notification` (zero idle cost when neither
+  backend is active).
+- **`Service/`** implements the standalone native x64 C++20 Radio Proxy Service
+  (`Service/Protocol/` pure C++20 USB/IP v1.1.1, HCI/L2CAP MITM, UAC1 virtual mic, and
+  crash watchdog + `Service/Win/` WinUSB/SetupAPI/USB-IP/Named-Pipe supervisor).
+- **`Driver/BthAapBridge/`** remains as an optional x64 KMDF 1.15 Bluetooth L2CAP profile
+  driver binding strictly to `BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}` (see
+  [Driver README](../Driver/BthAapBridge/README.md)).
+- **`Core::AirPods::Manager`** runs the AAP handshake, suspends BLE scanning while an AAP
+  session is connected, and routes listening/feature commands down the transport.
+- **`MainWindowPresentation`**, **`MainWindow`** and **`TrayIcon`** automatically reveal
+  Noise Control and Conversation Awareness UI only when the active transport reports
+  `noiseControl.controllable`.
+
+## Audio protection, shortcuts & CLI automation
+
+- **`Source/Core/AudioControl.h`** (`AudioControl_win.cpp`) watches Windows Core Audio
+  (WASAPI) endpoints for the bound AirPods `ContainerId` on an event-driven MTA worker:
+  detects active Hands-Free Profile (HFP) sessions and the triggering process name, locks
+  Windows' default microphone to a user-selected desktop mic ("Stereo Lock"), switches
+  playback output on wear/removal (`SmartAudioRoutePolicy`), and enforces an optional
+  reconnect volume cap.
+- **`Source/Core/GlobalHotkeys.h`** (`GlobalHotkeys_win.cpp`) registers native Win32
+  `RegisterHotKey` bindings on a hidden window (zero keyboard hooks, zero polling).
+- **`Source/Core/Ipc.h`** (`Ipc_win.cpp`) exposes a per-user overlapped Named Pipe so CLI
+  flags (`--status`, `--connect`, `--disconnect`, `--toggle-connect`, `--popup`,
+  `--settings`, `--mode <off|anc|transparency|adaptive|cycle>`) work instantaneously from
+  terminals, Stream Deck, or scripts.
+- **`Source/Domain/BatteryTracker.h`** computes discharging/charging time estimates and
+  sustained asymmetric drain warnings purely in memory from state transitions.
+
+## Module boundaries (zero exceptions)
+
+`Source/Domain/BluetoothTypes.h` defines the plain `ReceivedAdvertisement` value type, so
+`apb_domain` has zero includes from `Source/Core/` and CI enforces the dependency DAG
+strictly with no exceptions.
 
 ## Platform code
 
@@ -252,8 +299,8 @@ the clock's log line -- which display, what rate, which source -- is what to rea
 | What | Where |
 | --- | --- |
 | Settings | `Source/Core/SettingsRepository` |
-| Logs | `%LOCALAPPDATA%\AirpodsBridge\AirpodsBridge.log` |
-| Settings storage | Registry, `HKCU\Software\AirpodsBridge\AirpodsBridge` (`QSettings`, user scope, native format) |
+| Logs | `%LOCALAPPDATA%\AirpodsBridge\AirpodsBridge.log` (rotating 5 MB × 2), or `<appDir>\Logs\AirpodsBridge.log` in portable mode |
+| Settings storage | Registry, `HKCU\Software\AirpodsBridge\AirpodsBridge` (`QSettings`, user scope, native format), or `<appDir>\AirpodsBridge.ini` in portable mode |
 | Device binding | Settings, by Bluetooth address |
 | Install location | Registry, `HKCU\Software\AirpodsBridge\Installer`, written by the installer and left alone by the application |
 
@@ -277,3 +324,4 @@ after any change to `Source/Gui/SettingsWindow.cpp`, the widgets, or a palette.
 * [Releasing](Releasing.md) — versioning, tagging, the installer, published artefacts.
 * [Performance](Performance.md) — the idle-CPU constraint and what keeps it low.
 * [Artwork](Artwork.md) — where the device pictures come from and how to refresh them.
+* [RadioService](RadioService.md) — No-Test-Mode WinUSB + `usbip-win2` + HCI/L2CAP MITM architecture and safety watchdog.

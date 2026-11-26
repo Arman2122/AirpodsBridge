@@ -47,10 +47,10 @@ apb_support  ->  apb_domain  ->  apb_core          ->  apb_gui  ->  AirpodsBridg
 Adding a source file means adding it to the matching `APB_*_CODE_FILES` list in
 `CMakeLists.txt`. Putting a file in a directory does not build it.
 
-One known exception is documented in
-[Architecture](Docs/Architecture.md#known-wart): `Source/Domain/AirPodsAdvertisement.h`
-includes `Source/Core/Bluetooth.h` for a value type. Do not use it to justify new
-domain-to-core includes.
+Module boundaries have zero exceptions (see
+[Architecture](Docs/Architecture.md#module-boundaries-zero-exceptions)): `apb_domain` must
+never include anything from `Source/Core/`, `Source/Presentation/`, `Source/Gui/`, or
+`Source/App/`.
 
 ## 4. Conventions
 

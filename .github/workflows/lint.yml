@@ -32,7 +32,7 @@ jobs:
 
       - name: Check formatting
         run: |
-          find Source Tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 \
+          find Source Service Tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 \
             | xargs -0 clang-format --dry-run --Werror
 
   cmake:
@@ -71,7 +71,7 @@ jobs:
           missing=$(grep -RL 'SPDX-License-Identifier' \
             --include='*.cpp' --include='*.h' --include='*.py' \
             --include='*.cmake' --include='CMakeLists.txt' --include='*.h.in' \
-            Source Tests Tools CMake CMakeLists.txt || true)
+            Source Service Tests Tools CMake CMakeLists.txt || true)
           if [ -n "$missing" ]; then
             echo "Missing SPDX-License-Identifier:"
             echo "$missing"
@@ -97,17 +97,9 @@ jobs:
             done
           }
           check Support Domain Core Presentation Gui App
-          check Domain Presentation Gui App
+          check Domain Core Presentation Gui App
           check Presentation Core Gui App
           check Core Gui App
-          # Domain -> Core is a single documented exception; see Docs/Architecture.md.
-          hits=$(grep -rn "include .Source/Core/" Source/Domain/ |
-            grep -v "AirPodsAdvertisement.h:.*Core/Bluetooth.h" || true)
-          if [ -n "$hits" ]; then
-            echo "Domain must not include Core (beyond the documented exception):"
-            echo "$hits"
-            status=1
-          fi
           exit $status
       - name: Relative links resolve
         # Catches a document referencing a file that was renamed or never existed, which is
