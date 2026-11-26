@@ -1,32 +1,17 @@
-<!--
-Thanks for contributing. Keep the sections that apply and delete the rest —
-a short, accurate description beats a long template filled in mechanically.
--->
+## Summary
 
-## What and why
+<!-- What changes for users or contributors, and why? -->
 
-<!-- The motivation, and the behaviour change. Not a restatement of the diff. -->
+<!-- Link a related issue or discussion. Use Fixes #123 when merging resolves the issue. -->
 
-Closes #
+## Verification
 
-## How it was tested
+<!-- List the checks you ran and their results. For checks that did not apply or could not be run, say so. -->
 
-- [ ] Builds in Win32 `RelWithDebInfo`
-- [ ] `ctest --preset dev` passes
-- [ ] `clang-format` clean on every file touched
+- **Build and tests:** <!-- Win32 RelWithDebInfo via the dev preset, ctest, and formatting for C++ changes. Include the x64 service build when affected. -->
+- **Manual verification:** <!-- For Bluetooth, tray, audio, or settings, include Windows build, device, BLE or Control Engine mode, and what you exercised. -->
 
-Bluetooth, tray, media and settings flows are not covered by automation. If this touches
-one of them, say which you exercised by hand:
+## Review notes
 
-<!-- e.g. "Bound and unbound AirPods Pro 2, confirmed ear detection pauses Spotify." -->
-
-## Notes for the reviewer
-
-<!-- Delete any that do not apply. -->
-
-- **New dependency:** <!-- name, licence, why it is needed -->
-- **New or changed setting:** <!-- and what happens on upgrade for existing users -->
-- **Device-specific:** <!-- which AirPods or Beats model this depends on -->
-- **Windows-specific:** <!-- which Windows versions this was checked against -->
-- **UI change:** <!-- attach a screenshot or a short recording -->
-- **Layering:** <!-- if this adds a dependency between modules, say which and why -->
+<!-- Include light and dark screenshots for visual changes, or a short recording if motion is important. -->
+<!-- Call out effects on existing settings, dependencies, adapter setup, or recovery. Link the Unreleased changelog entry for user-visible changes. -->
