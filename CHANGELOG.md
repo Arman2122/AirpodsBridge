@@ -7,6 +7,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-27
+
+Major feature release introducing the No-Test-Mode Bluetooth Radio Proxy Service (two-way AAP controls with Secure Boot ON), real optical PPG Heart Rate monitoring for AirPods Pro 3 and Powerbeats Pro 2, Liquid Glass UI, all 31 AirPods & Beats models with official Apple artwork, ultra-low-latency `3.0 ms` WASAPI + native Gaming/Music codec switching, and reliable automatic audio output switching.
+
 ### Added
 
 - **Ultra-Low-Latency Audio Engine (`3.0 ms` `IAudioClient3` + `IPolicyConfig` APO Bypass)**
@@ -524,5 +528,6 @@ First public release.
 - The close button's circle was drawn to the integer widget rect, so its antialiased edge
   was clipped by the widget boundary and left a hard fringe.
 
-[Unreleased]: https://github.com/Arman2122/AirpodsBridge/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Arman2122/AirpodsBridge/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Arman2122/AirpodsBridge/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Arman2122/AirpodsBridge/releases/tag/v1.0.0
