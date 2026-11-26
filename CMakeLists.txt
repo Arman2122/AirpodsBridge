@@ -19,7 +19,7 @@ set(
 
 project(
     AirpodsBridge
-    VERSION 1.1.0 # Keep in sync with `version-string` in `vcpkg.json`
+    VERSION 1.1.1 # Keep in sync with `version-string` in `vcpkg.json`
     LANGUAGES C CXX
     DESCRIPTION "Native AirPods & Beats controls, battery, heart rate, and low-latency audio for Windows"
     HOMEPAGE_URL "https://github.com/${APB_GITHUB_OWNER}/${APB_GITHUB_REPOSITORY}"

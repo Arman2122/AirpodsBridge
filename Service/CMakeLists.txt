@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     AirpodsBridgeService
-    VERSION 1.1.0
+    VERSION 1.1.1
     LANGUAGES CXX
     DESCRIPTION "Native x64 No-Test-Mode Bluetooth HCI/L2CAP Proxy Service for AirpodsBridge"
 )

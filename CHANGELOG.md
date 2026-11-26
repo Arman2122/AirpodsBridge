@@ -7,6 +7,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-27
+
+Stability and polish patch release resolving Windows shutdown `0x9F` BSODs during driver swaps and virtual USB/IP teardown, one-bud A2DP static/silence on bud reinsertion, Heart Rate auto-start on connect, and Listening Mode pill geometry.
+
 ### Changed
 
 - Removed the battery time-remaining estimate subtitle (`~Xh Ym left`) from the popup header for a
@@ -588,6 +592,7 @@ First public release.
 - The close button's circle was drawn to the integer widget rect, so its antialiased edge
   was clipped by the widget boundary and left a hard fringe.
 
-[Unreleased]: https://github.com/Arman2122/AirpodsBridge/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Arman2122/AirpodsBridge/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/Arman2122/AirpodsBridge/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Arman2122/AirpodsBridge/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Arman2122/AirpodsBridge/releases/tag/v1.0.0
