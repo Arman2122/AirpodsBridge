@@ -21,10 +21,16 @@ constexpr uint16_t kCmdReadBdAddr = 0x1009;
 constexpr uint8_t kEvtConnectionComplete = 0x03;
 constexpr uint8_t kEvtDisconnectionComplete = 0x05;
 constexpr uint8_t kEvtEncryptionChange = 0x08;
+constexpr uint8_t kEvtQosSetupComplete = 0x0D;
 constexpr uint8_t kEvtCommandComplete = 0x0E;
 constexpr uint8_t kEvtCommandStatus = 0x0F;
 constexpr uint8_t kEvtHardwareError = 0x10;
+constexpr uint8_t kEvtFlushOccurred = 0x11;
+constexpr uint8_t kEvtRoleChange = 0x12;
 constexpr uint8_t kEvtNumCompletedPackets = 0x13;
+constexpr uint8_t kEvtModeChange = 0x14;
+constexpr uint8_t kEvtDataBufferOverflow = 0x1A;
+constexpr uint8_t kEvtMaxSlotsChange = 0x1B;
 constexpr uint8_t kEvtSyncConnectionComplete = 0x2C;
 
 // L2CAP signaling codes.
@@ -43,6 +49,67 @@ uint16_t ReadLe16(std::span<const uint8_t> b, size_t off)
 {
     return static_cast<uint16_t>(b[off]) |
            static_cast<uint16_t>(static_cast<uint16_t>(b[off + 1]) << 8);
+}
+
+uint32_t ReadLe32(std::span<const uint8_t> b, size_t off)
+{
+    return static_cast<uint32_t>(b[off]) | (static_cast<uint32_t>(b[off + 1]) << 8) |
+           (static_cast<uint32_t>(b[off + 2]) << 16) | (static_cast<uint32_t>(b[off + 3]) << 24);
+}
+
+std::string DescribeAvdtpMediaCodec(std::span<const uint8_t> caps)
+{
+    size_t pos = 0;
+    while (pos + 2 <= caps.size()) {
+        const uint8_t category = caps[pos];
+        const uint8_t losc = caps[pos + 1];
+        if (pos + 2 + losc > caps.size()) {
+            break;
+        }
+        // Service Category 0x07 = Media Codec (AVDTP Spec §8.21.5).
+        if (category == 0x07 && losc >= 2) {
+            const uint8_t mediaCodecType = caps[pos + 3];
+            if (mediaCodecType == 0x00 && losc >= 6) {
+                const uint8_t b0 = caps[pos + 4];
+                const uint8_t b1 = caps[pos + 5];
+                const uint8_t minBp = caps[pos + 6];
+                const uint8_t maxBp = caps[pos + 7];
+                const char *freq = (b0 & 0x10u)   ? "48kHz"
+                                   : (b0 & 0x20u) ? "44.1kHz"
+                                   : (b0 & 0x40u) ? "32kHz"
+                                                  : "16kHz";
+                const char *ch = (b0 & 0x01u)   ? "JointStereo"
+                                 : (b0 & 0x02u) ? "Stereo"
+                                 : (b0 & 0x04u) ? "DualChannel"
+                                                : "Mono";
+                const char *alloc = (b1 & 0x01u) ? "Loudness" : "SNR";
+                return std::string{"SBC("} + freq + ", " + ch + ", " + alloc +
+                       ", bitpool=" + std::to_string(minBp) + ".." + std::to_string(maxBp) + ")";
+            }
+            if (mediaCodecType == 0x02 && losc >= 8) {
+                const uint8_t obj = caps[pos + 4];
+                const uint8_t f0 = caps[pos + 5];
+                const uint8_t f1 = caps[pos + 6];
+                const uint8_t br0 = caps[pos + 7];
+                const uint8_t br1 = caps[pos + 8];
+                const uint8_t br2 = caps[pos + 9];
+                const bool vbr = (br0 & 0x80u) != 0;
+                const uint32_t bitrate = (static_cast<uint32_t>(br0 & 0x7Fu) << 16) |
+                                         (static_cast<uint32_t>(br1) << 8) |
+                                         static_cast<uint32_t>(br2);
+                const char *freq = (f1 & 0x80u)   ? "44.1kHz"
+                                   : (f1 & 0x40u) ? "48kHz"
+                                   : (f0 & 0x01u) ? "32kHz"
+                                                  : "other";
+                const char *ch = (f1 & 0x04u) ? "2ch" : "1ch";
+                return std::string{"AAC(obj=0x"} + std::to_string(obj) + ", " + freq + ", " + ch +
+                       ", vbr=" + (vbr ? "1" : "0") + ", bitrate=" + std::to_string(bitrate) + ")";
+            }
+            return "CodecType(" + std::to_string(mediaCodecType) + ")";
+        }
+        pos += 2 + losc;
+    }
+    return "unknown";
 }
 
 void WriteLe16(std::span<uint8_t> b, size_t off, uint16_t v)
@@ -169,7 +236,7 @@ void HciProxyEngine::SetConfig(const ProxyConfig &config)
 {
     std::lock_guard<std::mutex> lock{_mutex};
     _config = config;
-    if (_config.pollLatencyUs < 1250 || _config.pollLatencyUs > 50000) {
+    if (_config.pollLatencyUs < kMinSafeAirPodsPollLatencyUs || _config.pollLatencyUs > 50000) {
         _config.pollLatencyUs = kDefaultPollLatencyUs;
     }
 }
@@ -231,6 +298,19 @@ void HciProxyEngine::RevertInjectedAcl(uint16_t handle)
     if (_totalOurOutstanding > 0) {
         --_totalOurOutstanding;
     }
+}
+
+void HciProxyEngine::ResetWindowsOutPduState()
+{
+    DeferredNotifications deferred;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        for (auto &[handle, link] : _aclLinks) {
+            link.windowsPduRemaining = 0;
+        }
+        FlushQueuedAclLocked(deferred);
+    }
+    DispatchDeferred(deferred);
 }
 
 void HciProxyEngine::Tick(uint64_t nowMs)
@@ -414,25 +494,41 @@ bool HciProxyEngine::ProcessWindowsCommand(std::vector<uint8_t> &command)
     }
 
     const uint16_t opcode = ReadLe16(command, 0);
-    std::lock_guard<std::mutex> lock{_mutex};
+    DeferredNotifications deferred;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
 
-    if (!_config.lowLatencyQos) {
-        return true;
-    }
-
-    // Rewrite Windows' default 25 ms ACL poll latency down to our configured low-latency target
-    // (default 11.25 ms / 18 slots — 55% faster than stock Windows while leaving 12 free slots
-    // after each 3-DH5 A2DP packet for AirPods' single-radio primary-to-secondary inter-bud
-    // relay) while preserving Windows' spec-valid `Service_Type` and `Delay_Variation`.
-    if (opcode == kCmdQosSetup && command.size() >= 23) {
-        const uint16_t handle = static_cast<uint16_t>(ReadLe16(command, 3) & 0x0FFFu);
-        if (const auto it = _aclLinks.find(handle);
-            it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
-        {
-            WriteLe32(command, 15, _config.pollLatencyUs);
-            ++_rewrittenQosCommands;
+        // Clamp slow or unspecified (`0` / `0xFFFFFFFF` / > target) `HCI_QoS_Setup` (0x0807)
+        // latencies on tracked AirPods links down to an A2DP-safe floor (>= 25000 us / 40 slots).
+        // Never tighten below 25000 us: 44.1 kHz A2DP frames arrive every 23.22 ms, and sub-25 ms
+        // Master NULL polls interrupt Apple H2's primary-to-secondary inter-bud radio window and
+        // trigger one-bud silence / single-ear audio static on bud removal/reinsertion.
+        if (opcode == kCmdQosSetup && command.size() >= 23) {
+            const uint16_t handle = static_cast<uint16_t>(ReadLe16(command, 3) & 0x0FFFu);
+            if (const auto it = _aclLinks.find(handle);
+                it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
+            {
+                const uint8_t svcType = command[6];
+                const uint32_t origLatency = ReadLe32(command, 15);
+                uint32_t appliedLatency = origLatency;
+                if (_config.lowLatencyQos) {
+                    const uint32_t targetUs =
+                        std::max(kMinSafeAirPodsPollLatencyUs, _config.pollLatencyUs);
+                    if (origLatency == 0 || origLatency > targetUs) {
+                        WriteLe32(command, 15, targetUs);
+                        appliedLatency = targetUs;
+                        ++_rewrittenQosCommands;
+                    }
+                }
+                deferred.logs.emplace_back(
+                    LogLevel::Info,
+                    "HCI QoS_Setup on AirPods (handle=" + std::to_string(handle) + ", svcType=" +
+                        std::to_string(svcType) + ", origLatencyUs=" + std::to_string(origLatency) +
+                        ", appliedLatencyUs=" + std::to_string(appliedLatency) + ").");
+            }
         }
     }
+    DispatchDeferred(deferred);
     return true;
 }
 
@@ -985,6 +1081,103 @@ void HciProxyEngine::HandleSingleEventLocked(
         break;
     }
 
+    case kEvtQosSetupComplete: {
+        if (evt.size() >= 23) {
+            const uint8_t status = evt[2];
+            const uint16_t handle = static_cast<uint16_t>(ReadLe16(evt, 3) & 0x0FFFu);
+            if (const auto it = _aclLinks.find(handle);
+                it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
+            {
+                deferred.logs.emplace_back(
+                    status == 0 ? LogLevel::Info : LogLevel::Warn,
+                    "HCI QoS_Setup_Complete on AirPods (handle=" + std::to_string(handle) +
+                        ", status=" + std::to_string(status) +
+                        ", svcType=" + std::to_string(evt[6]) +
+                        ", latencyUs=" + std::to_string(ReadLe32(evt, 15)) + ").");
+            }
+        }
+        break;
+    }
+
+    case kEvtFlushOccurred: {
+        if (evt.size() >= 4) {
+            const uint16_t handle = static_cast<uint16_t>(ReadLe16(evt, 2) & 0x0FFFu);
+            if (const auto it = _aclLinks.find(handle);
+                it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
+            {
+                const uint32_t count = ++it->second.flushCount;
+                if (count == 1 || count == 10 || (count % 50) == 0) {
+                    deferred.logs.emplace_back(
+                        LogLevel::Warn, "HCI Flush_Occurred on AirPods A2DP link (handle=" +
+                                            std::to_string(handle) +
+                                            ", totalFlushes=" + std::to_string(count) + ").");
+                }
+            }
+        }
+        break;
+    }
+
+    case kEvtRoleChange: {
+        if (evt.size() >= 10) {
+            const uint8_t status = evt[2];
+            const uint64_t addr = ReadBdAddrLe(evt.subspan(3, 6));
+            const uint8_t newRole = evt[9];
+            if (IsTrackedAirPodsAddressLocked(addr)) {
+                deferred.logs.emplace_back(
+                    LogLevel::Info, "HCI Role_Change on AirPods (status=" + std::to_string(status) +
+                                        ", role=" + (newRole == 0 ? "Central" : "Peripheral") +
+                                        ").");
+            }
+        }
+        break;
+    }
+
+    case kEvtModeChange: {
+        if (evt.size() >= 8) {
+            const uint8_t status = evt[2];
+            const uint16_t handle = static_cast<uint16_t>(ReadLe16(evt, 3) & 0x0FFFu);
+            const uint8_t mode = evt[5];
+            const uint16_t interval = ReadLe16(evt, 6);
+            if (const auto it = _aclLinks.find(handle);
+                it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
+            {
+                const char *modeName = mode == 0   ? "Active"
+                                       : mode == 1 ? "Hold"
+                                       : mode == 2 ? "Sniff"
+                                                   : "Other";
+                deferred.logs.emplace_back(
+                    LogLevel::Info, "HCI Mode_Change on AirPods (handle=" + std::to_string(handle) +
+                                        ", status=" + std::to_string(status) + ", mode=" +
+                                        modeName + ", interval=" + std::to_string(interval) + ").");
+            }
+        }
+        break;
+    }
+
+    case kEvtDataBufferOverflow: {
+        const uint8_t linkType = evt.size() >= 3 ? evt[2] : 0;
+        deferred.logs.emplace_back(
+            LogLevel::Warn, "Bluetooth controller reported HCI Data_Buffer_Overflow (linkType=" +
+                                std::to_string(linkType) + ").");
+        break;
+    }
+
+    case kEvtMaxSlotsChange: {
+        if (evt.size() >= 5) {
+            const uint16_t handle = static_cast<uint16_t>(ReadLe16(evt, 2) & 0x0FFFu);
+            const uint8_t maxSlots = evt[4];
+            if (const auto it = _aclLinks.find(handle);
+                it != _aclLinks.end() && IsTrackedAirPodsAddressLocked(it->second.btAddress))
+            {
+                deferred.logs.emplace_back(
+                    LogLevel::Info,
+                    "HCI Max_Slots_Change on AirPods (handle=" + std::to_string(handle) +
+                        ", maxSlots=" + std::to_string(maxSlots) + ").");
+            }
+        }
+        break;
+    }
+
     default:
         break;
     }
@@ -1406,6 +1599,24 @@ void HciProxyEngine::DeliverAapSduLocked(
     if (sdu.empty()) {
         return;
     }
+    // Log AAP 0x06 Ear Detection changes directly at the HCI layer so bud removals/reinsertions
+    // correlate cleanly with AVDTP and baseband events even when the UI is not attached.
+    if (sdu.size() >= 8 && sdu[0] == 0x04 && sdu[1] == 0x00 && sdu[2] == 0x04 && sdu[3] == 0x00 &&
+        sdu[4] == 0x06 && sdu[5] == 0x00)
+    {
+        const uint8_t primary = sdu[6];
+        const uint8_t secondary = sdu[7];
+        if (primary != link.lastEarPrimary || secondary != link.lastEarSecondary) {
+            link.lastEarPrimary = primary;
+            link.lastEarSecondary = secondary;
+            deferred.logs.emplace_back(
+                LogLevel::Info,
+                "AAP EarDetection on AirPods (handle=" + std::to_string(link.handle) +
+                    ", primary=" + std::to_string(primary) +
+                    ", secondary=" + std::to_string(secondary) +
+                    ", streaming=" + (link.avdtp.streaming ? "1" : "0") + ").");
+        }
+    }
     deferred.aapPackets.emplace_back(link.btAddress, std::vector<uint8_t>{sdu.begin(), sdu.end()});
 }
 
@@ -1461,11 +1672,36 @@ void HciProxyEngine::SnoopWindowsAclPacketLocked(
         (body[0] & 0x0Fu) == 0)
     {
         const uint8_t signal = static_cast<uint8_t>(body[1] & 0x3Fu);
-        if (signal == 0x07) { // AVDTP_START
-            link.avdtp.streaming = true;
+        const bool tracked = IsTrackedAirPodsAddressLocked(link.btAddress);
+        if (signal == 0x03 && body.size() >= 4) { // AVDTP_SET_CONFIGURATION
+            if (tracked) {
+                deferred.logs.emplace_back(
+                    LogLevel::Info, "AVDTP SetConfiguration on AirPods: " +
+                                        DescribeAvdtpMediaCodec(body.subspan(4)) + ".");
+            }
         }
-        else if (signal == 0x08 || signal == 0x09) { // AVDTP_CLOSE / AVDTP_SUSPEND
+        else if (signal == 0x05 && body.size() >= 3) { // AVDTP_RECONFIGURE
+            if (tracked) {
+                deferred.logs.emplace_back(
+                    LogLevel::Info, "AVDTP Reconfigure on AirPods: " +
+                                        DescribeAvdtpMediaCodec(body.subspan(3)) + ".");
+            }
+        }
+        else if (signal == 0x07) { // AVDTP_START
+            link.avdtp.streaming = true;
+            if (tracked) {
+                deferred.logs.emplace_back(LogLevel::Info, "AVDTP Start on AirPods (streaming=1).");
+            }
+        }
+        else if (signal == 0x08 || signal == 0x09 || signal == 0x0A) { // CLOSE / SUSPEND / ABORT
             link.avdtp.streaming = false;
+            if (tracked) {
+                const char *evName = signal == 0x08   ? "Close"
+                                     : signal == 0x09 ? "Suspend"
+                                                      : "Abort";
+                deferred.logs.emplace_back(
+                    LogLevel::Info, std::string{"AVDTP "} + evName + " on AirPods (streaming=0).");
+            }
         }
     }
 }

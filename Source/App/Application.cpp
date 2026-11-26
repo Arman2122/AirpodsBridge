@@ -169,7 +169,7 @@ void ApbApplication::EnsureRadioServiceEnabledOnStart()
                             _airPodsManager->ApplyRadioProxyOptions(
                                 Core::AirPods::RadioProxyOptions{
                                     .lowLatencyQos = f.radio_service_low_latency_qos,
-                                    .pollLatencyUs = 11250,
+                                    .pollLatencyUs = 25000,
                                     .declineHfp = f.radio_service_hfp_decline,
                                     .virtualMicEnabled = f.radio_service_virtual_mic,
                                 });
@@ -385,9 +385,22 @@ void ApbApplication::ConnectAirPodsManager()
         Qt::QueuedConnection);
     connect(
         manager, &Core::AirPods::Manager::StateUpdated, this,
-        [this](const Core::AirPods::State &state) {
+        [this, wasOneBudInEar = false](const Core::AirPods::State &state) mutable {
             _audioControl->SetAirPodsWorn(
                 Core::Automation::EarDetectionPolicy::IsWorn(state, true));
+            if (!Core::AirPods::IsOnePiece(state.model)) {
+                const bool leftIn = state.pods.left.isInEar;
+                const bool rightIn = state.pods.right.isInEar;
+                const bool bothIn = leftIn && rightIn;
+                const bool oneIn = leftIn != rightIn;
+                if (wasOneBudInEar && bothIn) {
+                    _audioControl->NotifyBudReinserted();
+                }
+                wasOneBudInEar = oneIn;
+            }
+            else {
+                wasOneBudInEar = false;
+            }
         },
         Qt::QueuedConnection);
     connect(
@@ -617,7 +630,7 @@ void ApbApplication::ConnectGuiComponents()
                                         _airPodsManager->ApplyRadioProxyOptions(
                                             Core::AirPods::RadioProxyOptions{
                                                 .lowLatencyQos = f.radio_service_low_latency_qos,
-                                                .pollLatencyUs = 11250,
+                                                .pollLatencyUs = 25000,
                                                 .declineHfp = f.radio_service_hfp_decline,
                                                 .virtualMicEnabled = f.radio_service_virtual_mic,
                                             });
@@ -1035,7 +1048,7 @@ void ApbApplication::WireSettings()
         const auto f = Core::Settings::GetCurrent();
         manager->ApplyRadioProxyOptions(Core::AirPods::RadioProxyOptions{
             .lowLatencyQos = f.radio_service_low_latency_qos,
-            .pollLatencyUs = 11250,
+            .pollLatencyUs = 25000,
             .declineHfp = f.radio_service_hfp_decline,
             .virtualMicEnabled = f.radio_service_virtual_mic,
         });

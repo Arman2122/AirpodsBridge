@@ -619,6 +619,17 @@ void RadioServiceProtocolTests::HciProxyPullModeNeverInterleavesAndRevertsWriteE
     engine.OpenAapChannel(kAddr);
     QVERIFY(engine.PopNextInjectedAcl(popped, poppedHandle));
     QCOMPARE(poppedHandle, kHandle);
+
+    // Simulate a failed/aborted fragmented Windows Bulk OUT write -> ResetWindowsOutPduState
+    // unblocks subsequent AAP injection immediately so PDU tracking can never stay wedged.
+    engine.RevertInjectedAcl(poppedHandle);
+    engine.CloseAapChannel(kAddr);
+    engine.ProcessWindowsAclOut(MakeAclPkt(kHandle, 0x02, firstFragPayload), fwdOut);
+    engine.OpenAapChannel(kAddr);
+    QVERIFY(!engine.PopNextInjectedAcl(popped, poppedHandle));
+    engine.ResetWindowsOutPduState();
+    QVERIFY(engine.PopNextInjectedAcl(popped, poppedHandle));
+    QCOMPARE(poppedHandle, kHandle);
 }
 
 void RadioServiceProtocolTests::HciProxyReservesCompactControllerAclBuffersConservatively()
@@ -641,10 +652,13 @@ void RadioServiceProtocolTests::HciProxyReservesCompactControllerAclBuffersConse
     QCOMPARE(engine.GetTelemetry().aclTotalBuffers, uint16_t{6});
     QCOMPARE(ReadLe16(winEvents, 9), uint16_t{4});
 
-    // Default ProxyConfig uses Apple-aligned 11.25 ms (18-slot) poll latency so AirPods'
-    // primary-to-secondary inter-bud ANC/DSP relay is never starved.
-    QCOMPARE(ProxyConfig{}.pollLatencyUs, 11250u);
-    QCOMPARE(HciProxyEngine::kDefaultPollLatencyUs, 11250u);
+    // Default ProxyConfig uses an A2DP-safe 25.0 ms (40-slot) poll floor (> 23.22 ms A2DP frame
+    // cadence) so Master NULL polls never interrupt Apple H2's primary-to-secondary inter-bud
+    // radio sync window. Legacy sub-25 ms configs clamp safely up to 25000 us.
+    QCOMPARE(ProxyConfig{}.pollLatencyUs, 25000u);
+    QCOMPARE(HciProxyEngine::kDefaultPollLatencyUs, 25000u);
+    engine.SetConfig(ProxyConfig{.lowLatencyQos = true, .pollLatencyUs = 11250});
+    QCOMPARE(engine.GetConfig().pollLatencyUs, 25000u);
 }
 
 void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods()
@@ -655,12 +669,14 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
     constexpr uint16_t kMouseHandle = 0x000D;
 
     std::vector<std::vector<uint8_t>> injected;
+    std::vector<std::string> logs;
     HciProxyEngine::Callbacks cb{};
     cb.sendAclToController = [&](std::vector<uint8_t> p) { injected.push_back(std::move(p)); };
+    cb.onLog = [&](HciProxyEngine::LogLevel, std::string msg) { logs.push_back(std::move(msg)); };
     HciProxyEngine engine{cb};
     engine.SetConfig(ProxyConfig{
         .lowLatencyQos = true,
-        .pollLatencyUs = 11250,
+        .pollLatencyUs = 25000,
         .declineHfp = true,
         .virtualMicEnabled = false,
     });
@@ -677,18 +693,20 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
             0x03, 0x0B, 0x00, 0x0D, 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x01, 0x00},
         out);
 
-    // 1. HCI_QoS_Setup (0x0807): tightens AirPods poll latency to 11250 us while preserving
-    //    spec-valid Service_Type and Delay_Variation so Intel/AirPods LMP QoS stays rock-solid.
-    auto makeQos = [](uint16_t handle) {
+    // 1. HCI_QoS_Setup (0x0807): clamps slow/unspecified AirPods poll latencies (> 25000 us or
+    //    0xFFFFFFFF) down to 25000 us while never shortening <= 25000 us below the A2DP-safe floor.
+    auto makeQos = [](uint16_t handle, uint32_t latencyUs) {
         std::vector<uint8_t> cmd(23, 0);
         cmd[0] = 0x07;
         cmd[1] = 0x08;
         cmd[2] = 20;
         cmd[3] = static_cast<uint8_t>(handle & 0xFFu);
         cmd[4] = static_cast<uint8_t>((handle >> 8) & 0xFFu);
-        cmd[6] = 0x01;  // Best Effort
-        cmd[15] = 0xA8; // 25000 = 0x000061A8
-        cmd[16] = 0x61;
+        cmd[6] = 0x01; // Best Effort
+        cmd[15] = static_cast<uint8_t>(latencyUs & 0xFFu);
+        cmd[16] = static_cast<uint8_t>((latencyUs >> 8) & 0xFFu);
+        cmd[17] = static_cast<uint8_t>((latencyUs >> 16) & 0xFFu);
+        cmd[18] = static_cast<uint8_t>((latencyUs >> 24) & 0xFFu);
         cmd[19] = 0xFF; // 0xFFFFFFFF don't-care Delay_Variation
         cmd[20] = 0xFF;
         cmd[21] = 0xFF;
@@ -696,21 +714,40 @@ void RadioServiceProtocolTests::HciProxyRewritesQosAndDeclinesHfpOnlyForAirPods(
         return cmd;
     };
 
-    auto qosAirPods = makeQos(kAirPodsHandle);
-    QVERIFY(engine.ProcessWindowsCommand(qosAirPods));
-    QCOMPARE(qosAirPods[6], uint8_t{0x01});
-    QCOMPARE(ReadLe32(qosAirPods, 15), 11250u);
-    QCOMPARE(ReadLe32(qosAirPods, 19), 0xFFFFFFFFu);
+    auto qosAirPodsSlow = makeQos(kAirPodsHandle, 0xFFFFFFFFu);
+    QVERIFY(engine.ProcessWindowsCommand(qosAirPodsSlow));
+    QCOMPARE(qosAirPodsSlow[6], uint8_t{0x01});
+    QCOMPARE(ReadLe32(qosAirPodsSlow, 15), 25000u);
+    QCOMPARE(ReadLe32(qosAirPodsSlow, 19), 0xFFFFFFFFu);
 
-    auto qosMouse = makeQos(kMouseHandle);
+    auto qosAirPodsSafe = makeQos(kAirPodsHandle, 25000u);
+    QVERIFY(engine.ProcessWindowsCommand(qosAirPodsSafe));
+    QCOMPARE(ReadLe32(qosAirPodsSafe, 15), 25000u);
+
+    auto qosMouse = makeQos(kMouseHandle, 0xFFFFFFFFu);
     QVERIFY(engine.ProcessWindowsCommand(qosMouse));
     QCOMPARE(qosMouse[6], uint8_t{0x01});
-    QCOMPARE(ReadLe32(qosMouse, 15), 25000u); // Mouse untouched!
+    QCOMPARE(ReadLe32(qosMouse, 15), 0xFFFFFFFFu); // Mouse untouched!
     QCOMPARE(ReadLe32(qosMouse, 19), 0xFFFFFFFFu);
+
+    // 2. AVDTP SetConfiguration snooping logs negotiated SBC codec details cleanly.
+    std::vector<uint8_t> fwdOut;
+    const std::vector<uint8_t> avdtpConnReq = {0x02, 0x01, 0x04, 0x00, 0x19, 0x00, 0x45, 0x00};
+    engine.ProcessWindowsAclOut(MakeL2capPkt(kAirPodsHandle, 0x0001, avdtpConnReq), fwdOut);
+    const std::vector<uint8_t> avdtpConnRsp = {0x03, 0x01, 0x08, 0x00, 0x55, 0x00,
+                                               0x45, 0x00, 0x00, 0x00, 0x00, 0x00};
+    std::vector<uint8_t> winAcl;
+    engine.ProcessControllerAclIn(MakeL2capPkt(kAirPodsHandle, 0x0001, avdtpConnRsp), winAcl);
+    const std::vector<uint8_t> avdtpSetCfg = {0x10, 0x03, 0x04, 0x04, 0x07, 0x06,
+                                              0x00, 0x00, 0x21, 0x15, 0x02, 0x35};
+    engine.ProcessWindowsAclOut(MakeL2capPkt(kAirPodsHandle, 0x0055, avdtpSetCfg), fwdOut);
+    const bool sawSbcLog = std::any_of(logs.begin(), logs.end(), [](const std::string &s) {
+        return s.find("SBC(44.1kHz, JointStereo, Loudness, bitpool=2..53)") != std::string::npos;
+    });
+    QVERIFY(sawSbcLog);
 
     // Peer-initiated RFCOMM ConnReq (PSM 0x0003) is declined for AirPods, forwarded for Mouse.
     const std::vector<uint8_t> rfcommConnReq = {0x02, 0x05, 0x04, 0x00, 0x03, 0x00, 0x41, 0x00};
-    std::vector<uint8_t> winAcl;
     engine.ProcessControllerAclIn(MakeL2capPkt(kAirPodsHandle, 0x0001, rfcommConnReq), winAcl);
     QVERIFY(winAcl.empty());
     QCOMPARE(engine.GetTelemetry().declinedHfpRequests, uint64_t{1});

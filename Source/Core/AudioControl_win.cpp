@@ -956,6 +956,23 @@ public:
         });
     }
 
+    void NotifyBudReinserted()
+    {
+        Post([this] {
+            if (_stopping || !_keepAliveEnabled || !_airPodsWorn || !_stereoActive) {
+                return;
+            }
+            if (_keepAliveThread.joinable() || _keepAliveActive.load()) {
+                LOG(Info, "AudioControl: bud reinserted (1->2 in-ear); pausing silent keep-alive "
+                          "for 1200 ms so AirPods Primary/Secondary A2DP clocks re-sync cleanly.");
+                StopKeepAlive();
+                RefreshLatencyDiagnosticsInternal();
+            }
+            _keepAliveRetryCount = 0;
+            ScheduleDeadline(_keepAliveStartDeadline, std::chrono::milliseconds{1200});
+        });
+    }
+
     void RefreshLatencyDiagnostics()
     {
         Post([this] { RefreshLatencyDiagnosticsInternal(); });
@@ -2672,6 +2689,11 @@ void Service::SuspendKeepAliveTemporarily()
     _impl->SuspendKeepAliveTemporarily();
 }
 
+void Service::NotifyBudReinserted()
+{
+    _impl->NotifyBudReinserted();
+}
+
 void Service::RefreshLatencyDiagnostics()
 {
     _impl->RefreshLatencyDiagnostics();
@@ -2768,10 +2790,11 @@ LatencyProfileApplyResult ApplyLatencyProfileInProcess(
         RegCloseKey(renderRoot);
     }
 
-    // 3. Best-effort USB Bluetooth radio power-saving & Selective Suspend policy via native COM
-    //    WMI and native 64-bit HKLM registry (zero PowerShell).
-    UpdateUsbBluetoothPowerPolicyWmi(lowLatencySbc);
-    UpdateUsbBluetoothSelectiveSuspendRegistry(lowLatencySbc);
+    // 3. Keep USB Bluetooth radio power-saving & Selective Suspend disabled in BOTH Music (AAC)
+    //    and Gaming (SBC) modes so Windows never parks the Bluetooth adapter into USB D2/D3
+    //    sleep during A2DP playback or bud removal/reinsertion.
+    UpdateUsbBluetoothPowerPolicyWmi(true);
+    UpdateUsbBluetoothSelectiveSuspendRegistry(true);
 
     // 4. Re-negotiate the AirPods/Beats A2DP PnP node via cfgmgr32.dll so the new codec and APO
     //    state take effect immediately without rebooting Windows.

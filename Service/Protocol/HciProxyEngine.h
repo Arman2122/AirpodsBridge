@@ -29,14 +29,14 @@ namespace Service::Protocol {
 //   - Maintains exact HCI ACL controller credit accounting and subtracts injected packet
 //     completions from `Number_Of_Completed_Packets` (0x13) so Windows' credit pool never
 //     drifts.
-//   - Rewrites `HCI_QoS_Setup` (0x0807) poll latency on tracked AirPods links when low-latency
-//     QoS is enabled (default 11250 us / 18 BR/EDR slots instead of Windows' 25000 us, preserving
-//     spec-valid Service_Type and Delay_Variation plus headroom for primary-to-secondary inter-bud
-//     ANC/DSP sync so both earbuds switch listening modes together).
+//   - Clamps slow or unspecified `HCI_QoS_Setup` (0x0807) poll latencies on tracked AirPods links
+//     down to an A2DP-safe floor (default 25000 us / 40 BR/EDR slots, strictly above the 23.22 ms
+//     44.1 kHz A2DP frame cadence so Master NULL polls never interrupt Apple H2's primary-to-
+//     secondary inter-bud relay or trigger one-bud silence/noise during bud re-insertion).
 //   - Supports pull-mode ACL injection so a single Bulk OUT owner pops injected packets right
 //     before writing to WinUSB, making Windows L2CAP fragment interleaving impossible.
-//   - Snoops AVDTP (PSM 0x0019) and optionally declines AirPods RFCOMM HFP (PSM 0x0003)
-//     requests when HFP protection is enabled, without affecting non-AirPods devices.
+//   - Snoops AVDTP (PSM 0x0019) codec/stream state and optionally declines AirPods RFCOMM HFP
+//     (PSM 0x0003) requests when HFP protection is enabled, without affecting non-AirPods devices.
 //
 class HciProxyEngine
 {
@@ -49,7 +49,8 @@ public:
     static constexpr uint8_t kFirstReservedSigId = 0xC0;
     static constexpr uint8_t kLastReservedSigId = 0xFE;
     static constexpr uint16_t kOurAapMtu = 2582;
-    static constexpr uint32_t kDefaultPollLatencyUs = 11250;
+    static constexpr uint32_t kMinSafeAirPodsPollLatencyUs = 25000;
+    static constexpr uint32_t kDefaultPollLatencyUs = 25000;
 
     enum class LogLevel : uint8_t { Trace = 0, Info = 1, Warn = 2, Error = 3 };
 
@@ -97,6 +98,8 @@ public:
     bool PopNextInjectedAcl(std::vector<uint8_t> &outPacket, uint16_t &outHandle);
     // Releases controller credit accounting if a pulled injected ACL write failed at WinUSB.
     void RevertInjectedAcl(uint16_t handle);
+    // Clears stale Windows outbound L2CAP fragment tracking after a failed/aborted Bulk OUT write.
+    void ResetWindowsOutPduState();
 
     // Resets controller/link state (e.g. radio detached or HCI_Reset).
     void Reset(std::string_view reason);
@@ -172,6 +175,9 @@ private:
         bool encrypted{false};
         uint32_t ourOutstandingPackets{0};
         uint32_t windowsPduRemaining{0};
+        uint32_t flushCount{0};
+        uint8_t lastEarPrimary{0xFF};
+        uint8_t lastEarSecondary{0xFF};
         // Inbound L2CAP continuation routing state for this ACL handle.
         bool rxIntercepting{false};
         uint16_t rxActiveLocalCid{0};

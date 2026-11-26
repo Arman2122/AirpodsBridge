@@ -7,6 +7,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed single-ear audio static/noise paired with silence in the opposite AirPod after removing
+  and reinserting the primary bud or during 2.4 GHz RF bursts (`Service/Protocol/HciProxyEngine.h/.cpp`,
+  `Service/Protocol/ServiceProtocol.h`, `Service/Win/RegistryStore.cpp`, `Service/Win/WinUsbRadio.cpp`,
+  `Service/Win/RadioBridgeSession.h/.cpp`, `Source/Core/AudioControl.h`,
+  `Source/Core/AudioControl_win.cpp`, `Source/App/Application.cpp`):
+  - Enforced an A2DP-safe `25.0 ms` (40-slot) floor on `HCI_QoS_Setup` (`0x0807`) polling (strictly
+    above the `23.22 ms` 44.1 kHz A2DP frame cadence, migrating legacy `3.75 ms` / `11.25 ms`
+    values automatically) so Intel/Bluetooth Master NULL polls never interrupt Apple H2's
+    primary-to-secondary inter-bud 2.4 GHz sync window while still clamping slow/unspecified host
+    requests (`0xFFFFFFFF` / `> 25 ms`).
+  - Eliminated ~200/s per-packet kernel `CreateEventW`/`CloseHandle` churn on the real-time USB/IP
+    Bulk OUT/IN A2DP path via reusable per-thread `OVERLAPPED` events and per-pipe cancel events,
+    reset outbound L2CAP PDU tracking on Bulk OUT errors/unlinks, and added zero-spam baseband &
+    AVDTP codec (`SBC`/`AAC`), stream, flush, role/mode-change, and AAP ear-detection diagnostics.
+  - Temporarily pauses the silent WASAPI keep-alive stream for `1200 ms` on `1 -> 2` bud
+    reinsertion so Apple H2 Primary/Secondary A2DP clocks re-lock cleanly, and keeps USB Bluetooth
+    Selective Suspend disabled in both `Music (AAC)` and `Gaming (SBC)` audio modes.
+
 ## [1.1.0] - 2026-11-27
 
 Major feature release introducing the No-Test-Mode Bluetooth Radio Proxy Service (two-way AAP controls with Secure Boot ON), real optical PPG Heart Rate monitoring for AirPods Pro 3 and Powerbeats Pro 2, Liquid Glass UI, all 31 AirPods & Beats models with official Apple artwork, ultra-low-latency `3.0 ms` WASAPI + native Gaming/Music codec switching, and reliable automatic audio output switching.

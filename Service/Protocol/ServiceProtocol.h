@@ -74,7 +74,7 @@ struct Frame {
 
 struct ProxyConfig {
     bool lowLatencyQos{true};
-    uint32_t pollLatencyUs{11250};
+    uint32_t pollLatencyUs{25000};
     bool declineHfp{false};
     bool virtualMicEnabled{false};
 

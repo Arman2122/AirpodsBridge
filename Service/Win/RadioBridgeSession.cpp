@@ -71,9 +71,6 @@ void RadioBridgeSession::Stop()
         std::lock_guard<std::mutex> lock{_liveMutex};
         for (auto &[seq, urb] : _liveUrbs) {
             urb->unlinked.store(true);
-            if (urb->cancelEvent.Valid()) {
-                SetEvent(urb->cancelEvent.Get());
-            }
         }
     }
 
@@ -86,6 +83,9 @@ void RadioBridgeSession::Stop()
             {
                 std::lock_guard<std::mutex> qlock{pq->mutex};
                 pq->stopped = true;
+                if (pq->cancelEvent.Valid()) {
+                    SetEvent(pq->cancelEvent.Get());
+                }
             }
             pq->cv.notify_all();
             queues.push_back(pq);
@@ -125,8 +125,18 @@ void RadioBridgeSession::Run()
             }
             if (target) {
                 target->unlinked.store(true);
-                if (target->cancelEvent.Valid()) {
-                    SetEvent(target->cancelEvent.Get());
+                if (target->pipeAddr == _hciPipes.aclOutPipe) {
+                    ServiceLog::Write(
+                        LogLevel::Warn, "radio",
+                        "USB/IP CMD_UNLINK on HCI Bulk OUT pipe (seq=" +
+                            std::to_string(hdr.unlinkSeqnum) +
+                            ", len=" + std::to_string(target->outPayload.size()) + ").");
+                }
+                if (auto pq = target->pipeQueue.lock()) {
+                    std::lock_guard<std::mutex> qlock{pq->mutex};
+                    if (pq->activeUrb == target && pq->cancelEvent.Valid()) {
+                        SetEvent(pq->cancelEvent.Get());
+                    }
                 }
             }
             const auto reply = Protocol::UsbIp::EncodeRetUnlink(
@@ -139,7 +149,6 @@ void RadioBridgeSession::Run()
 
         auto urb = std::make_shared<PendingUrb>();
         urb->header = hdr;
-        urb->cancelEvent = UniqueHandle{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
 
         if (hdr.direction == Protocol::UsbIp::kDirOut && hdr.transferBufferLength > 0) {
             if (hdr.transferBufferLength > 2u * 1024u * 1024u) {
@@ -166,13 +175,14 @@ void RadioBridgeSession::Run()
             }
         }
 
+        const uint8_t pipeAddr = hdr.endpoint == 0 ? 0u : hdr.PipeAddress();
+        auto pq = GetOrCreatePipeQueue(pipeAddr);
+        urb->pipeAddr = pipeAddr;
+        urb->pipeQueue = pq;
         {
             std::lock_guard<std::mutex> lock{_liveMutex};
             _liveUrbs[hdr.seqnum] = urb;
         }
-
-        const uint8_t pipeAddr = hdr.endpoint == 0 ? 0u : hdr.PipeAddress();
-        auto pq = GetOrCreatePipeQueue(pipeAddr);
         {
             std::lock_guard<std::mutex> qlock{pq->mutex};
             pq->queue.push_back(std::move(urb));
@@ -251,6 +261,7 @@ RadioBridgeSession::GetOrCreatePipeQueue(uint8_t pipeAddr)
         return it->second;
     }
     auto pq = std::make_shared<PipeQueue>();
+    pq->cancelEvent = UniqueHandle{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
     pq->worker = std::thread{&RadioBridgeSession::PipeWorkerLoop, this, pipeAddr, pq};
     _pipes.emplace(pipeAddr, pq);
     return pq;
@@ -284,6 +295,13 @@ void RadioBridgeSession::PipeWorkerLoop(uint8_t pipeAddr, std::shared_ptr<PipeQu
             else if (!pq->queue.empty()) {
                 urb = std::move(pq->queue.front());
                 pq->queue.pop_front();
+                pq->activeUrb = urb;
+                if (pq->cancelEvent.Valid()) {
+                    ResetEvent(pq->cancelEvent.Get());
+                    if (urb->unlinked.load()) {
+                        SetEvent(pq->cancelEvent.Get());
+                    }
+                }
             }
         }
 
@@ -291,8 +309,15 @@ void RadioBridgeSession::PipeWorkerLoop(uint8_t pipeAddr, std::shared_ptr<PipeQu
             DrainInjectedAcl(pipeAddr);
         }
         else if (urb) {
-            ExecuteUrb(pipeAddr, urb);
+            ExecuteUrb(pipeAddr, urb, pq->cancelEvent.Get());
 
+            {
+                std::lock_guard<std::mutex> qlock{pq->mutex};
+                pq->activeUrb.reset();
+                if (pq->cancelEvent.Valid()) {
+                    ResetEvent(pq->cancelEvent.Get());
+                }
+            }
             if (!urb->internal) {
                 std::lock_guard<std::mutex> lock{_liveMutex};
                 _liveUrbs.erase(urb->header.seqnum);
@@ -368,7 +393,8 @@ void RadioBridgeSession::HandleWritePipeFailure(
     }
 }
 
-void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<PendingUrb> &urb)
+void RadioBridgeSession::ExecuteUrb(
+    uint8_t pipeAddr, const std::shared_ptr<PendingUrb> &urb, HANDLE cancelEvent)
 {
     if (urb->unlinked.load()) {
         if (!urb->internal) {
@@ -457,7 +483,7 @@ void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<Pend
         std::vector<uint8_t> inData;
         uint32_t transferred = 0;
         const uint32_t err =
-            _radio.ControlTransfer(hdr.setup, outCopy, inData, transferred, urb->cancelEvent.Get());
+            _radio.ControlTransfer(hdr.setup, outCopy, inData, transferred, cancelEvent);
         if (WinUsbRadio::IsFatalDeviceLossError(err)) {
             MarkDeviceLost(err);
         }
@@ -476,7 +502,7 @@ void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<Pend
         Protocol::UsbIp::IsoTransferResult isoRes;
         const bool isIn = hdr.direction == Protocol::UsbIp::kDirIn;
         const uint32_t err = _radio.TransferIsoch(
-            pipeAddr, isIn, urb->outPayload, pktCount, bytesPerPkt, isoRes, urb->cancelEvent.Get());
+            pipeAddr, isIn, urb->outPayload, pktCount, bytesPerPkt, isoRes, cancelEvent);
         if (WinUsbRadio::IsFatalDeviceLossError(err)) {
             MarkDeviceLost(err);
         }
@@ -495,7 +521,7 @@ void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<Pend
         // Windows never receives spurious 0-byte completions on the HCI pipes.
         while (!_stopped.load() && !urb->unlinked.load()) {
             const uint32_t err =
-                _radio.ReadPipe(pipeAddr, hdr.transferBufferLength, raw, urb->cancelEvent.Get());
+                _radio.ReadPipe(pipeAddr, hdr.transferBufferLength, raw, cancelEvent);
             if (err != ERROR_SUCCESS) {
                 if (WinUsbRadio::IsFatalDeviceLossError(err)) {
                     MarkDeviceLost(err);
@@ -554,13 +580,16 @@ void RadioBridgeSession::ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<Pend
     }
 
     uint32_t written = 0;
-    const uint32_t err = _radio.WritePipe(pipeAddr, toSend, written, urb->cancelEvent.Get());
+    const uint32_t err = _radio.WritePipe(pipeAddr, toSend, written, cancelEvent);
     if (err == ERROR_SUCCESS) {
         if (pipeAddr == _hciPipes.aclOutPipe) {
             _consecutiveAclOutTimeouts.store(0);
         }
     }
     else {
+        if (pipeAddr == _hciPipes.aclOutPipe) {
+            _hci.ResetWindowsOutPduState();
+        }
         HandleWritePipeFailure(pipeAddr, toSend.size(), err, "Windows HCI ACL");
     }
     SendReply(Protocol::UsbIp::EncodeRetSubmit(

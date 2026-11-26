@@ -116,6 +116,9 @@ public:
     // Cleanly stops the active WASAPI keep-alive stream prior to a Bluetooth reconnect pulse so
     // the endpoint tears down silently without audio pops or glitches.
     void SuspendKeepAliveTemporarily();
+    // Temporarily yields the silent WASAPI keep-alive for 1.2 s when a removed bud is reinserted
+    // (1 -> 2 buds in ear) so Apple H2 Primary/Secondary A2DP clocks re-lock cleanly.
+    void NotifyBudReinserted();
     void RefreshLatencyDiagnostics();
 
     std::vector<AudioEndpoint> ListCaptureEndpoints() const;

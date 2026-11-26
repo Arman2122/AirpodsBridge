@@ -12,6 +12,17 @@ namespace Service::Win {
 
 namespace {
 
+// Reusable manual-reset OVERLAPPED event per worker thread: eliminates ~200/s kernel event
+// CreateEventW/CloseHandle cycles on the real-time A2DP Bulk OUT/IN audio path.
+HANDLE ThreadOverlappedEvent()
+{
+    thread_local UniqueHandle ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    if (ev.Valid()) {
+        ResetEvent(ev.Get());
+    }
+    return ev.Get();
+}
+
 uint32_t WaitOverlapped(
     WINUSB_INTERFACE_HANDLE iface, HANDLE fileHandle, OVERLAPPED &ov, DWORD &transferred,
     HANDLE cancelEvent)
@@ -235,9 +246,12 @@ uint32_t WinUsbRadio::ControlTransfer(
         buf.assign(outData.begin(), outData.end());
     }
 
-    UniqueHandle ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    HANDLE ovEvent = ThreadOverlappedEvent();
+    if (ovEvent == nullptr) {
+        return GetLastError();
+    }
     OVERLAPPED ov{};
-    ov.hEvent = ev.Get();
+    ov.hEvent = ovEvent;
 
     ULONG xfer = 0;
     const BOOL ok = WinUsb_ControlTransfer(
@@ -311,9 +325,12 @@ uint32_t WinUsbRadio::ReadPipe(
     }
 
     outBuffer.resize(maxLength);
-    UniqueHandle ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    HANDLE ovEvent = ThreadOverlappedEvent();
+    if (ovEvent == nullptr) {
+        return GetLastError();
+    }
     OVERLAPPED ov{};
-    ov.hEvent = ev.Get();
+    ov.hEvent = ovEvent;
 
     ULONG got = 0;
     const BOOL ok = WinUsb_ReadPipe(
@@ -351,12 +368,12 @@ uint32_t WinUsbRadio::WritePipe(
         return ERROR_INVALID_HANDLE;
     }
 
-    UniqueHandle ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
-    if (!ev.Valid()) {
+    HANDLE ovEvent = ThreadOverlappedEvent();
+    if (ovEvent == nullptr) {
         return GetLastError();
     }
     OVERLAPPED ov{};
-    ov.hEvent = ev.Get();
+    ov.hEvent = ovEvent;
 
     ULONG sent = 0;
     const BOOL ok = WinUsb_WritePipe(
@@ -409,9 +426,12 @@ uint32_t WinUsbRadio::TransferIsoch(
     }
 
     std::vector<USBD_ISO_PACKET_DESCRIPTOR> descs(packetCount);
-    UniqueHandle ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    HANDLE ovEvent = ThreadOverlappedEvent();
+    if (ovEvent == nullptr) {
+        return GetLastError();
+    }
     OVERLAPPED ov{};
-    ov.hEvent = ev.Get();
+    ov.hEvent = ovEvent;
 
     BOOL ok = FALSE;
     if (isIn) {

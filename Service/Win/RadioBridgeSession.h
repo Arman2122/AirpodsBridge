@@ -58,13 +58,16 @@ public:
     }
 
 private:
+    struct PipeQueue;
+
     struct PendingUrb {
         Protocol::UsbIp::CommandHeader header;
         std::vector<uint8_t> outPayload;
         std::vector<uint8_t> isoDescriptors;
+        uint8_t pipeAddr{0};
         bool internal{false};
         bool internalCommand{false};
-        UniqueHandle cancelEvent;
+        std::weak_ptr<PipeQueue> pipeQueue;
         std::atomic<bool> unlinked{false};
     };
 
@@ -72,6 +75,8 @@ private:
         std::mutex mutex;
         std::condition_variable cv;
         std::deque<std::shared_ptr<PendingUrb>> queue;
+        std::shared_ptr<PendingUrb> activeUrb;
+        UniqueHandle cancelEvent;
         bool injectedPending{false};
         bool stopped{false};
         std::thread worker;
@@ -80,7 +85,7 @@ private:
     std::shared_ptr<PipeQueue> GetOrCreatePipeQueue(uint8_t pipeAddr);
     void PipeWorkerLoop(uint8_t pipeAddr, std::shared_ptr<PipeQueue> pq);
     void DrainInjectedAcl(uint8_t pipeAddr);
-    void ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<PendingUrb> &urb);
+    void ExecuteUrb(uint8_t pipeAddr, const std::shared_ptr<PendingUrb> &urb, HANDLE cancelEvent);
     void HandleWritePipeFailure(uint8_t pipeAddr, size_t len, uint32_t err, const char *origin);
     bool SendReply(std::span<const uint8_t> frame);
     void MarkDeviceLost(uint32_t win32Err);
