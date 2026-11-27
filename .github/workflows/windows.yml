@@ -209,6 +209,8 @@ jobs:
             'Build/Release/Binary/AirpodsBridgeService.exe',
             'Build/Release/Binary/Qt6Core.dll',
             'Build/Release/Binary/Qt6Widgets.dll',
+            'Build/Release/Binary/vcruntime140.dll',
+            'Build/Release/Binary/msvcp140.dll',
             'Build/Release/Binary/imageformats/qwebp.dll',
             'Build/Release/Binary/imageformats/qsvg.dll'
           )

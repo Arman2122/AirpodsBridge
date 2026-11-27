@@ -13,6 +13,10 @@ project(
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Link the MSVC runtime statically (/MT) so AirpodsBridgeService.exe runs from
+# %ProgramFiles%\AirpodsBridge\RadioService with zero external DLL dependencies,
+# even on a brand-new Windows x64 or ARM64 PC without the VC++ Redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(APB_SERVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(APB_SERVICE_OUT_DIR "${CMAKE_BINARY_DIR}/Binary")

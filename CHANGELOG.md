@@ -21,8 +21,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `QStandardPaths::AppLocalDataLocation`, `Qt::SkipEmptyParts`, and removed deprecated high-DPI
     and context-help attributes).
   - Trimmed ~39 MB of unused Mesa software OpenGL and DirectX HLSL shader compiler DLLs from
-    `windeployqt` deployment (`--no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler`)
-    and added cross-compile `QT_HOST_PATH` + `qtpaths6.bat` support for ARM64 deployment.
+    `windeployqt` deployment (`--no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler`),
+    bundled app-local MSVC runtime DLLs for clean Windows x64/ARM64 machines without the VC++
+    Redistributable, linked `AirpodsBridgeService.exe` statically (`/MT`) for zero runtime DLL
+    dependencies, and added cross-compile `QT_HOST_PATH` + `qtpaths6.bat` support for ARM64
+    deployment.
   - Added running architecture display (`x64` / `arm64`) to **Settings → About** and to
     `--status` / diagnostic clipboard JSON (`arch`, `platform`).
 

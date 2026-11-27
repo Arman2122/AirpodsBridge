@@ -587,6 +587,22 @@ if (MSVC)
                     "${APB_BINARY_OUT_DIR}/${PROJECT_NAME}.exe"
             COMMENT "Deploying Qt 6 (${APB_TARGET_ARCH})..."
         )
+
+        # Deploy app-local MSVC C++ runtime DLLs matching the target architecture (x64 or ARM64)
+        # so brand-new Windows installations without the VC++ 2015-2022 Redistributable (very
+        # common on fresh Windows 11 and Snapdragon ARM64 laptops) run cleanly on first click.
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+        include(InstallRequiredSystemLibraries)
+        if (CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+            add_custom_command(
+                TARGET ${PROJECT_NAME}
+                POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+                        "${APB_BINARY_OUT_DIR}"
+                COMMENT "Deploying MSVC runtime DLLs (${APB_TARGET_ARCH})..."
+            )
+        endif()
     endif()
 endif()
 

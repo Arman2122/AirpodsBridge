@@ -188,6 +188,18 @@ Function .onInit
     Abort
   ${EndIf}
 
+  ${If} "${TARGET_ARCH}" == "arm64"
+    System::Call 'kernel32::GetCurrentProcess() p.r0'
+    StrCpy $1 0
+    System::Call 'kernel32::IsWow64Process2(p r0, *i 0, *i r1r1) i.r2'
+    IntOp $1 $1 & 0xFFFF
+    ${If} $2 != 0
+    ${AndIf} $1 != 0xAA64
+      MessageBox MB_OK|MB_ICONSTOP "This is the Windows ARM64 installer, but this PC is not ARM64.$\r$\n$\r$\nPlease download the win-x64 installer instead."
+      Abort
+    ${EndIf}
+  ${EndIf}
+
   SetShellVarContext current
 
   ; A copy installed for all users predates this installer and lives in Program Files.
