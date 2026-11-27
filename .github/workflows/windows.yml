@@ -315,6 +315,79 @@ jobs:
           Copy-Item -LiteralPath $installer.FullName -Destination $installerDestination
           Compress-Archive -Path "$portableSource/*" -DestinationPath $portableDestination
 
+      - name: End-to-end installer smoke test (${{ matrix.platform_tag }})
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PLATFORM_TAG: ${{ matrix.platform_tag }}
+        run: |
+          $installer = (Resolve-Path "dist/AirpodsBridge-$env:VERSION-$env:PLATFORM_TAG.exe").Path
+          if ('${{ matrix.cross_compile }}' -eq 'true') {
+            # Verify the ARM64 installer refuses to install onto an x64 host even in /S silent mode.
+            $guardDir = Join-Path $env:RUNNER_TEMP 'e2e-arm64-guard'
+            Remove-Item -Recurse -Force $guardDir -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $installer -ArgumentList "/S /D=$guardDir" -Wait -PassThru
+            if ($p.ExitCode -eq 0 -or (Test-Path (Join-Path $guardDir 'AirpodsBridge.exe'))) {
+              throw "ARM64 installer should have aborted on x64 host (exit=$($p.ExitCode))."
+            }
+            Write-Host "[PASS] ARM64 installer cleanly refused x64 host (exit=$($p.ExitCode))."
+          }
+          else {
+            # Full install -> clean-PATH launch -> uninstall round trip for win-x64.
+            $instDir = Join-Path $env:RUNNER_TEMP 'e2e-x64-install'
+            Remove-Item -Recurse -Force $instDir -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $installer -ArgumentList "/S /D=$instDir" -Wait -PassThru
+            if ($p.ExitCode -ne 0) {
+              throw "win-x64 NSIS silent install failed with exit code $($p.ExitCode)."
+            }
+            foreach ($must in @(
+              'AirpodsBridge.exe',
+              'AirpodsBridgeService.exe',
+              'Uninstall.exe',
+              'Qt6Core.dll',
+              'vcruntime140.dll',
+              'msvcp140.dll',
+              'imageformats\qwebp.dll',
+              'LICENSE',
+              'Licenses\Qt\LICENSE.LGPLv3'
+            )) {
+              if (-not (Test-Path -LiteralPath (Join-Path $instDir $must))) {
+                throw "Installed directory missing expected file: $must"
+              }
+            }
+            $regKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AirpodsBridge'
+            if (-not (Test-Path -LiteralPath $regKey)) {
+              throw 'Apps & features Uninstall registry key was not created.'
+            }
+            $cleanPath = ($env:PATH -split ';' | Where-Object { $_ -and ($_ -notmatch 'Qt|vcpkg') }) -join ';'
+            $oldPath = $env:PATH
+            try {
+              $env:PATH = $cleanPath
+              & (Join-Path $instDir 'AirpodsBridge.exe') --help | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                throw "Installed AirpodsBridge.exe --help failed with $LASTEXITCODE"
+              }
+              & (Join-Path $instDir 'AirpodsBridgeService.exe') --help | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                throw "Installed AirpodsBridgeService.exe --help failed with $LASTEXITCODE"
+              }
+            }
+            finally {
+              $env:PATH = $oldPath
+            }
+            $un = Start-Process -FilePath (Join-Path $instDir 'Uninstall.exe') -ArgumentList "/S _?=$instDir" -Wait -PassThru
+            if ($un.ExitCode -ne 0) {
+              throw "Uninstaller failed with exit code $($un.ExitCode)."
+            }
+            if (Test-Path -LiteralPath (Join-Path $instDir 'AirpodsBridge.exe')) {
+              throw 'AirpodsBridge.exe remained after uninstall.'
+            }
+            if (Test-Path -LiteralPath $regKey) {
+              throw 'Uninstall registry key remained after uninstall.'
+            }
+            Remove-Item -Recurse -Force $instDir -ErrorAction SilentlyContinue
+            Write-Host '[PASS] win-x64 NSIS install, clean-PATH launch, and uninstall E2E verified.'
+          }
+
       - name: Sign installer when a certificate is configured
         if: github.ref_type == 'tag'
         env:

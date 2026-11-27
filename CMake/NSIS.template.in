@@ -184,7 +184,7 @@ FunctionEnd
 
 Function .onInit
   ${IfNot} ${RunningX64}
-    MessageBox MB_OK|MB_ICONSTOP "${APP_NAME} ${VERSION} (${TARGET_ARCH}) requires 64-bit Windows (x64 or ARM64)."
+    MessageBox MB_OK|MB_ICONSTOP "${APP_NAME} ${VERSION} (${TARGET_ARCH}) requires 64-bit Windows (x64 or ARM64)." /SD IDOK
     Abort
   ${EndIf}
 
@@ -195,7 +195,7 @@ Function .onInit
     IntOp $1 $1 & 0xFFFF
     ${If} $2 != 0
     ${AndIf} $1 != 0xAA64
-      MessageBox MB_OK|MB_ICONSTOP "This is the Windows ARM64 installer, but this PC is not ARM64.$\r$\n$\r$\nPlease download the win-x64 installer instead."
+      MessageBox MB_OK|MB_ICONSTOP "This is the Windows ARM64 installer, but this PC is not ARM64.$\r$\n$\r$\nPlease download the win-x64 installer instead." /SD IDOK
       Abort
     ${EndIf}
   ${EndIf}

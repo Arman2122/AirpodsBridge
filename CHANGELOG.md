@@ -7,6 +7,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-27
+
+Major platform release migrating AirpodsBridge from 32-bit Win32 / Qt 5.15 to **Qt 6.8.3 LTS** with **native 64-bit Windows `x64` (`win-x64`) and native Windows `ARM64` (`win-arm64`)** builds, self-contained clean-machine runtime packaging, and fast live-synchronized Control Engine startup and shutdown.
+
 ### Changed
 
 - **Upgraded to Qt 6.8.3 LTS and native 64-bit Windows (`x64` & `ARM64`) architecture**
