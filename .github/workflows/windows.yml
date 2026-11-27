@@ -111,7 +111,7 @@ jobs:
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-          dir: ${{ runner.temp }}/Qt
+          dir: ${{ runner.temp }}
           cache: false
           set-env: false
 
@@ -124,7 +124,7 @@ jobs:
           target: desktop
           arch: ${{ matrix.qt_arch }}
           modules: qtimageformats
-          dir: ${{ runner.temp }}/Qt
+          dir: ${{ runner.temp }}
           cache: false
           set-env: false
 
