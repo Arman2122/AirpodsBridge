@@ -98,6 +98,7 @@ private Q_SLOTS:
     void ParsesUpdateVersions();
     void SanitizesUpdateAssetFileNames();
     void ParsesGitHubReleaseMetadata();
+    void SelectsMatchingArchitectureUpdateAsset();
     void RejectsReleaseMetadataFromAnotherRepository();
     void RejectsUpdateAssetsWithoutDigest();
     void VerifiesUpdateFileDigest();
@@ -565,11 +566,11 @@ void AirPodsDomainTests::ParsesUpdateVersions()
 void AirPodsDomainTests::SanitizesUpdateAssetFileNames()
 {
     QCOMPARE(
-        Core::Update::Details::SanitizeAssetFileName("AirpodsBridge-1.1.0-win32.exe"),
-        QString{"AirpodsBridge-1.1.0-win32.exe"});
+        Core::Update::Details::SanitizeAssetFileName("AirpodsBridge-1.2.0-win-x64.exe"),
+        QString{"AirpodsBridge-1.2.0-win-x64.exe"});
     QCOMPARE(
-        Core::Update::Details::SanitizeAssetFileName("../../evil/AirpodsBridge-1.1.0-win32.exe"),
-        QString{"AirpodsBridge-1.1.0-win32.exe"});
+        Core::Update::Details::SanitizeAssetFileName("../../evil/AirpodsBridge-1.2.0-win-x64.exe"),
+        QString{"AirpodsBridge-1.2.0-win-x64.exe"});
     QCOMPARE(Core::Update::Details::SanitizeAssetFileName("..\\..\\evil.exe"), QString{"evil.exe"});
     QVERIFY(Core::Update::Details::SanitizeAssetFileName("..").isEmpty());
     QVERIFY(Core::Update::Details::SanitizeAssetFileName(".").isEmpty());
@@ -577,24 +578,25 @@ void AirPodsDomainTests::SanitizesUpdateAssetFileNames()
 
 void AirPodsDomainTests::ParsesGitHubReleaseMetadata()
 {
+    const auto expectedAsset = QString{"AirpodsBridge-0.5.0-%1.exe"}.arg(CONFIG_CPACK_SYSTEM_NAME);
     const auto metadata = QString{R"json({
         "tag_name": "v0.5.0",
         "body": "## Change log\n- Add automatic updates\n\nInstallation notes",
         "html_url": "%1/tag/v0.5.0",
         "prerelease": false,
         "assets": [{
-            "name": "AirpodsBridge-0.5.0-win32.exe",
+            "name": "%2",
             "size": 123456,
             "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            "browser_download_url": "%1/download/v0.5.0/AirpodsBridge-0.5.0-win32.exe"
+            "browser_download_url": "%1/download/v0.5.0/%2"
         }]
     })json"}
-                              .arg(Config::UrlReleases);
+                              .arg(Config::UrlReleases, expectedAsset);
     const auto release = Core::Update::Details::ParseSingleReleaseResponse(metadata.toStdString());
 
     QVERIFY(release.has_value());
     QCOMPARE(release->version, QVersionNumber(0, 5, 0));
-    QCOMPARE(release->fileName, QString{"AirpodsBridge-0.5.0-win32.exe"});
+    QCOMPARE(release->fileName, expectedAsset);
     QCOMPARE(release->fileSize, size_t{123456});
     QCOMPARE(
         release->sha256,
@@ -634,6 +636,80 @@ void AirPodsDomainTests::ParsesGitHubReleaseMetadata()
     QCOMPARE(decoratedRelease->changeLog, QString{"1. Supported AirPods 4"});
 }
 
+void AirPodsDomainTests::SelectsMatchingArchitectureUpdateAsset()
+{
+    const QString ownPlatform{CONFIG_CPACK_SYSTEM_NAME};
+    const QString otherPlatform =
+        (ownPlatform.compare("win-x64", Qt::CaseInsensitive) == 0) ? "win-arm64" : "win-x64";
+    const QString ownAsset = QString{"AirpodsBridge-2.0.0-%1.exe"}.arg(ownPlatform);
+    const QString otherAsset = QString{"AirpodsBridge-2.0.0-%1.exe"}.arg(otherPlatform);
+    const QString ownPortable = QString{"AirpodsBridge-2.0.0-%1-portable.zip"}.arg(ownPlatform);
+
+    // Multi-architecture release: must skip legacy win32, portable zips, and the other
+    // architecture, selecting only the installer matching this binary's platform tag.
+    const auto multiArchMetadata = QString{R"json({
+        "tag_name": "v2.0.0",
+        "body": "## Change log\n- Native x64 and ARM64 builds",
+        "html_url": "%1/tag/v2.0.0",
+        "prerelease": false,
+        "assets": [
+            {
+                "name": "AirpodsBridge-2.0.0-win32.exe",
+                "size": 100000,
+                "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "browser_download_url": "%1/download/v2.0.0/AirpodsBridge-2.0.0-win32.exe"
+            },
+            {
+                "name": "%2",
+                "size": 200000,
+                "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "browser_download_url": "%1/download/v2.0.0/%2"
+            },
+            {
+                "name": "%3",
+                "size": 300000,
+                "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "browser_download_url": "%1/download/v2.0.0/%3"
+            },
+            {
+                "name": "%4",
+                "size": 400000,
+                "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                "browser_download_url": "%1/download/v2.0.0/%4"
+            }
+        ]
+    })json"}
+                                       .arg(Config::UrlReleases, otherAsset, ownPortable, ownAsset);
+
+    const auto multiRelease =
+        Core::Update::Details::ParseSingleReleaseResponse(multiArchMetadata.toStdString());
+    QVERIFY(multiRelease.has_value());
+    QCOMPARE(multiRelease->fileName, ownAsset);
+    QCOMPARE(multiRelease->fileSize, size_t{400000});
+    QVERIFY(multiRelease->CanAutoUpdate());
+
+    // Release containing only the other architecture must not auto-update this binary.
+    const auto wrongArchMetadata = QString{R"json({
+        "tag_name": "v2.0.0",
+        "body": "## Change log\n- Other arch only",
+        "html_url": "%1/tag/v2.0.0",
+        "prerelease": false,
+        "assets": [{
+            "name": "%2",
+            "size": 200000,
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "browser_download_url": "%1/download/v2.0.0/%2"
+        }]
+    })json"}
+                                       .arg(Config::UrlReleases, otherAsset);
+
+    const auto wrongArchRelease =
+        Core::Update::Details::ParseSingleReleaseResponse(wrongArchMetadata.toStdString());
+    QVERIFY(wrongArchRelease.has_value());
+    QVERIFY(wrongArchRelease->fileName.isEmpty());
+    QVERIFY(!wrongArchRelease->CanAutoUpdate());
+}
+
 void AirPodsDomainTests::RejectsReleaseMetadataFromAnotherRepository()
 {
     const auto release = Core::Update::Details::ParseSingleReleaseResponse(R"json({
@@ -649,18 +725,19 @@ void AirPodsDomainTests::RejectsReleaseMetadataFromAnotherRepository()
 
 void AirPodsDomainTests::RejectsUpdateAssetsWithoutDigest()
 {
+    const auto expectedAsset = QString{"AirpodsBridge-0.5.0-%1.exe"}.arg(CONFIG_CPACK_SYSTEM_NAME);
     const auto metadata = QString{R"json({
         "tag_name": "v0.5.0",
         "body": "Change log\nUnsigned asset",
         "html_url": "%1/tag/v0.5.0",
         "prerelease": false,
         "assets": [{
-            "name": "AirpodsBridge-0.5.0-win32.exe",
+            "name": "%2",
             "size": 123456,
-            "browser_download_url": "%1/download/v0.5.0/AirpodsBridge-0.5.0-win32.exe"
+            "browser_download_url": "%1/download/v0.5.0/%2"
         }]
     })json"}
-                              .arg(Config::UrlReleases);
+                              .arg(Config::UrlReleases, expectedAsset);
     const auto release = Core::Update::Details::ParseSingleReleaseResponse(metadata.toStdString());
 
     QVERIFY(release.has_value());

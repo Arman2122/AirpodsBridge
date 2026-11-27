@@ -79,7 +79,6 @@ Core::AirPods::State StateFor(Core::AirPods::Model model, uint8_t colour)
 
 int main(int argc, char *argv[])
 {
-    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication app{argc, argv};
 
     const QDir output{argc > 1 ? QString::fromLocal8Bit(argv[1]) : QDir::currentPath()};

@@ -65,8 +65,6 @@ ApbApplication::~ApbApplication()
 
 void ApbApplication::PreConstruction()
 {
-    setAttribute(Qt::AA_DisableWindowContextHelpButton);
-    setAttribute(Qt::AA_EnableHighDpiScaling);
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
 }
@@ -1184,6 +1182,8 @@ QString ApbApplication::BuildStatusJson() const
     nlohmann::json root;
     root["ok"] = true;
     root["version"] = Config::Version::String;
+    root["arch"] = CONFIG_TARGET_ARCH;
+    root["platform"] = CONFIG_CPACK_SYSTEM_NAME;
     root["portable"] = Utils::File::IsPortableMode();
     root["boundDevice"] = snap.boundDeviceName.toStdString();
     root["model"] = Helper::ToString(snap.boundModel).toStdString();

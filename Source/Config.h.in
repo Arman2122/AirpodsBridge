@@ -13,6 +13,7 @@ namespace Config {
 #define CONFIG_PROGRAM_NAME             "@PROJECT_NAME@"
 #define CONFIG_DESCRIPTION              "@PROJECT_DESCRIPTION@"
 #define CONFIG_COPYRIGHT                "Copyright © 2026 Arman2122"
+#define CONFIG_TARGET_ARCH              "@APB_TARGET_ARCH@"
 #define CONFIG_CPACK_SYSTEM_NAME        "@CPACK_SYSTEM_NAME@"
 #define CONFIG_GITHUB_OWNER             "@APB_GITHUB_OWNER@"
 #define CONFIG_GITHUB_REPOSITORY        "@APB_GITHUB_REPOSITORY@"

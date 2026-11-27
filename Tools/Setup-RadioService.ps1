@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #
 # One-click elevated setup / uninstall / recovery for the AirpodsBridge No-Test-Mode
-# Radio Proxy Service (`AirpodsBridgeService.exe`, native x64).
+# Radio Proxy Service (`AirpodsBridgeService.exe`, native x64 / ARM64).
 #
-# Automatically downloads & verifies the latest Microsoft-signed `usbip-win2` x64 release
-# from GitHub if not already present, stages and starts `AirpodsBridgeService`, and writes
-# its outcome to `C:\ProgramData\AirpodsBridge\SetupResult.txt` so the GUI reports exact
-# progress and errors instead of closing silently.
+# Automatically downloads & verifies the latest Microsoft-signed `usbip-win2` release
+# matching the host CPU architecture (`x64` or `arm64`) from GitHub if not already present,
+# stages and starts `AirpodsBridgeService`, and writes its outcome to
+# `C:\ProgramData\AirpodsBridge\SetupResult.txt` so the GUI reports exact progress and errors
+# instead of closing silently.
 #
 # Never enables Windows Test Mode and never disables Secure Boot.
 
@@ -54,14 +55,22 @@ function Assert-Elevated64Bit {
     }
 }
 
+function Get-HostArchTag {
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
+        return 'arm64'
+    }
+    return 'x64'
+}
+
 function Find-ServiceBinary {
     if ($ServiceBinaryPath -and (Test-Path -LiteralPath $ServiceBinaryPath)) {
         return (Resolve-Path -LiteralPath $ServiceBinaryPath).Path
     }
+    $arch = Get-HostArchTag
     $searchPaths = @(
         (Join-Path $PSScriptRoot 'AirpodsBridgeService.exe'),
         (Join-Path $PSScriptRoot '..\AirpodsBridgeService.exe'),
-        (Join-Path $PSScriptRoot '..\Build\service-x64\Binary\AirpodsBridgeService.exe'),
+        (Join-Path $PSScriptRoot "..\Build\service-$arch\Binary\AirpodsBridgeService.exe"),
         $TargetBinary
     )
     foreach ($candidate in $searchPaths) {
@@ -69,7 +78,7 @@ function Find-ServiceBinary {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
-    throw 'Could not locate AirpodsBridgeService.exe (x64).'
+    throw "Could not locate AirpodsBridgeService.exe ($arch)."
 }
 
 function Test-UsbipWin2Ready {
@@ -88,12 +97,14 @@ function Test-UsbipWin2Ready {
 
 function Download-LatestUsbipWin2 {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Write-Step 'Querying latest signed usbip-win2 release from GitHub...'
+    $arch = Get-HostArchTag
+    Write-Step "Querying latest signed usbip-win2 ($arch) release from GitHub..."
     $headers = @{ 'User-Agent' = 'AirpodsBridge-Setup' }
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/vadimgrn/usbip-win2/releases/latest' -Headers $headers -TimeoutSec 20
-    $asset = $release.assets | Where-Object { $_.name -match '^USBip-.*-x64\.exe$' } | Select-Object -First 1
+    $pattern = "^USBip-.*-$arch\.exe$"
+    $asset = $release.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
     if (-not $asset) {
-        throw 'Could not find x64 installer asset in vadimgrn/usbip-win2 latest release.'
+        throw "Could not find $arch installer asset in vadimgrn/usbip-win2 latest release."
     }
 
     $tempDir = Join-Path $env:TEMP 'AirpodsBridge-Usbip'

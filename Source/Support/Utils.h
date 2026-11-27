@@ -107,7 +107,7 @@ inline QDir GetWorkspace()
         location = QDir{QCoreApplication::applicationDirPath()}.absoluteFilePath("Logs");
     }
     else {
-        location = QStandardPaths::writableLocation(QStandardPaths::DataLocation);
+        location = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     }
 
     QDir result{std::move(location)};

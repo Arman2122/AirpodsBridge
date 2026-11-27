@@ -7,7 +7,7 @@ project(
     AirpodsBridgeService
     VERSION 1.1.1
     LANGUAGES CXX
-    DESCRIPTION "Native x64 No-Test-Mode Bluetooth HCI/L2CAP Proxy Service for AirpodsBridge"
+    DESCRIPTION "Native 64-bit (x64/ARM64) No-Test-Mode Bluetooth HCI/L2CAP Proxy Service for AirpodsBridge"
 )
 
 set(CMAKE_CXX_STANDARD 20)

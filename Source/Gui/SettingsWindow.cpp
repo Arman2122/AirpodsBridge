@@ -191,9 +191,12 @@ QString LinkHtml(const QString &url, const QString &text, const QColor &colour)
 
 QString VersionHtml()
 {
-    const auto &accent = Theme::Colours().Accent;
+    const auto &colours = Theme::Colours();
+    const auto &accent = colours.Accent;
     QString html =
         LinkHtml(Config::UrlCurrentRelease, QStringLiteral("v") + CONFIG_VERSION_STRING, accent);
+    html += QStringLiteral(" <span style=\"color:%1\">\u00B7 %2</span>")
+                .arg(colours.TextSecondary.name(), QStringLiteral(CONFIG_TARGET_ARCH));
 #if defined APB_BUILD_GIT_HASH
     html += QStringLiteral(" &nbsp;") +
             LinkHtml(
@@ -209,7 +212,7 @@ struct Library {
 
 constexpr Library kLibraries[] = {
     // clang-format off
-    { "Qt 5", "https://www.qt.io/download-qt-installer", "LGPLv3", "https://doc.qt.io/qt-5/lgpl.html" },
+    { "Qt 6", "https://www.qt.io/download-qt-installer", "LGPLv3", "https://doc.qt.io/qt-6/lgpl.html" },
     { "spdlog", "https://github.com/gabime/spdlog", "MIT", "https://github.com/gabime/spdlog/blob/v1.x/LICENSE" },
     { "cxxopts", "https://github.com/jarro2783/cxxopts", "MIT", "https://github.com/jarro2783/cxxopts/blob/master/LICENSE" },
     { "cpr", "https://github.com/whoshuu/cpr", "MIT", "https://github.com/whoshuu/cpr/blob/master/LICENSE" },
@@ -1568,13 +1571,13 @@ void SettingsWindow::RestoreDefaults()
 void SettingsWindow::UpdateAdvOverride()
 {
 #if defined APB_DEBUG
-    const auto lines = _advOverrideText->toPlainText().split('\n', QString::SkipEmptyParts);
+    const auto lines = _advOverrideText->toPlainText().split('\n', Qt::SkipEmptyParts);
 
     std::vector<std::vector<uint8_t>> advs;
     for (const auto &line : lines) {
         std::vector<uint8_t> bytes;
         bool lineValid = true;
-        for (const auto &byteText : line.split(' ', QString::SkipEmptyParts)) {
+        for (const auto &byteText : line.split(' ', Qt::SkipEmptyParts)) {
             bool success{false};
             const auto byte = byteText.toUInt(&success, 16);
             if (!success || byte > 0xFF) {

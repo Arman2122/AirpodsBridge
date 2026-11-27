@@ -120,12 +120,23 @@ endif()
 # Third party
 #
 
+# Target architecture & canonical platform tag (`win-x64` or `win-arm64`).
+# Set before `include(CPack)` so installers, portable ZIPs, and the in-app updater all use the
+# exact same architecture suffix instead of CPack's ambiguous `win64`.
+set(APB_TARGET_ARCH "x64")
+if (CMAKE_GENERATOR_PLATFORM MATCHES "^[Aa][Rr][Mm]64$" OR CMAKE_SYSTEM_PROCESSOR MATCHES "^([Aa][Rr][Mm]64|[Aa][Aa][Rr][Cc][Hh]64)$")
+    set(APB_TARGET_ARCH "arm64")
+endif()
+set(APB_PACKAGE_PLATFORM "win-${APB_TARGET_ARCH}")
+set(CPACK_SYSTEM_NAME "${APB_PACKAGE_PLATFORM}")
+
 # Qt
 #
+set(QT_DEFAULT_MAJOR_VERSION 6 CACHE STRING "Qt major version" FORCE)
 set(APB_QT_COMPONENTS Core Gui Widgets Svg)
-find_package(Qt5 COMPONENTS ${APB_QT_COMPONENTS} REQUIRED)
+find_package(Qt6 COMPONENTS ${APB_QT_COMPONENTS} REQUIRED)
 if (APB_BUILD_TESTS)
-    find_package(Qt5 COMPONENTS Test REQUIRED)
+    find_package(Qt6 COMPONENTS Test REQUIRED)
 endif()
 
 # spdlog
@@ -431,8 +442,8 @@ target_link_libraries(
     apb_support
 
     PUBLIC
-    Qt5::Core
-    Qt5::Gui
+    Qt6::Core
+    Qt6::Gui
     spdlog::spdlog
     cxxopts::cxxopts
     magic_enum::magic_enum
@@ -476,8 +487,8 @@ target_link_libraries(
     PUBLIC
     apb_core
     apb_presentation
-    Qt5::Widgets
-    Qt5::Svg
+    Qt6::Widgets
+    Qt6::Svg
 )
 
 add_executable(
@@ -534,16 +545,41 @@ if (MSVC)
     if (APB_QT_DEPLOY)
         #
         # `--no-translations` keeps windeployqt from copying Qt's own .qm catalogues
-        # next to the executable. This application ships English only, so those 23
-        # files (~3.8 MB) would never be loaded.
+        # next to the executable. This application ships English only, so those files
+        # would never be loaded.
         #
+        # When cross-compiling ARM64 from an x64 host, Qt6 provides `QT_HOST_PATH` for the
+        # runnable host `windeployqt.exe` and `qtpaths6.bat` inside the target ARM64 Qt tree so
+        # ARM64 DLLs and plugins (including qwebp/qsvg) are deployed instead of host x64 DLLs.
+        #
+        # `--no-opengl-sw`, `--no-system-d3d-compiler`, and `--no-system-dxc-compiler` skip
+        # ~39 MB of Mesa software OpenGL and DirectX HLSL shader compiler DLLs that a pure
+        # Qt Widgets (raster QPainter) application never loads.
+        set(APB_QT_TARGET_ROOT "${Qt6_DIR}/../../..")
+        set(APB_WINDEPLOYQT_ARGS
+            --no-translations
+            --no-opengl-sw
+            --no-system-d3d-compiler
+            --no-system-dxc-compiler
+        )
+        if (DEFINED QT_HOST_PATH AND EXISTS "${QT_HOST_PATH}/bin/windeployqt.exe")
+            set(APB_WINDEPLOYQT "${QT_HOST_PATH}/bin/windeployqt.exe")
+            if (EXISTS "${APB_QT_TARGET_ROOT}/bin/qtpaths6.bat")
+                list(APPEND APB_WINDEPLOYQT_ARGS --qtpaths "${APB_QT_TARGET_ROOT}/bin/qtpaths6.bat")
+            elseif (EXISTS "${APB_QT_TARGET_ROOT}/bin/qtpaths.bat")
+                list(APPEND APB_WINDEPLOYQT_ARGS --qtpaths "${APB_QT_TARGET_ROOT}/bin/qtpaths.bat")
+            endif()
+        else()
+            set(APB_WINDEPLOYQT "${APB_QT_TARGET_ROOT}/bin/windeployqt.exe")
+        endif()
+
         add_custom_command(
             TARGET ${PROJECT_NAME}
             POST_BUILD
-            COMMAND "${Qt5_DIR}/../../../bin/windeployqt"
-                    --no-translations
+            COMMAND "${APB_WINDEPLOYQT}"
+                    ${APB_WINDEPLOYQT_ARGS}
                     "${APB_BINARY_OUT_DIR}/${PROJECT_NAME}.exe"
-            COMMENT "Deploying Qt..."
+            COMMENT "Deploying Qt 6 (${APB_TARGET_ARCH})..."
         )
     endif()
 endif()
@@ -602,6 +638,7 @@ if (APB_GENERATE_INSTALLER)
         set(CPACK_NSIS_APB_SIDEBAR_BMP "${CMAKE_CURRENT_SOURCE_DIR}/Source/Resource/Installer/Sidebar.bmp")
         string(REPLACE "/" "\\\\" CPACK_NSIS_APB_HEADER_BMP "${CPACK_NSIS_APB_HEADER_BMP}")
         string(REPLACE "/" "\\\\" CPACK_NSIS_APB_SIDEBAR_BMP "${CPACK_NSIS_APB_SIDEBAR_BMP}")
+        set(CPACK_NSIS_APB_TARGET_ARCH "${APB_TARGET_ARCH}")
     endif()
 
     # Prevent CMake from adding "include" and "lib" directories

@@ -213,15 +213,11 @@ std::optional<ReleaseInfo> ParseSingleReleaseResponse(const std::string &text)
 #if !defined APB_OS_WIN
     #error "Need to port."
 #endif
-            // AirpodsBridge-x.x.x-win32.exe
+            // AirpodsBridge-x.x.x-win-x64.exe / AirpodsBridge-x.x.x-win-arm64.exe
             //
-            if (QFileInfo{fileName}.suffix() != "exe") {
-                LOG(Warn, "ParseSRResponse: Asset suffix is unsupported. Continue.");
-                continue;
-            }
-
-            if (fileName.indexOf(CONFIG_CPACK_SYSTEM_NAME) == -1) {
-                LOG(Warn, "ParseSRResponse: Asset platform is mismatched. Continue.");
+            const QString expectedSuffix = QString{"-%1.exe"}.arg(CONFIG_CPACK_SYSTEM_NAME);
+            if (!fileName.endsWith(expectedSuffix, Qt::CaseInsensitive)) {
+                LOG(Warn, "ParseSRResponse: Asset platform/suffix is mismatched. Continue.");
                 continue;
             }
 

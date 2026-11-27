@@ -5,7 +5,6 @@
 #include "Source/Gui/TaskbarGeometry.h"
 
 #include <QApplication>
-#include <QDesktopWidget>
 #include <QWindow>
 
 #include "Source/Core/SystemTheme.h"
@@ -488,7 +487,7 @@ void TaskbarStatus::mouseReleaseEvent(QMouseEvent *event)
         emit ShowMainWindowRequested();
     }
     else if (button == Qt::RightButton) {
-        emit ShowTrayMenuRequested(event->globalPos());
+        emit ShowTrayMenuRequested(event->globalPosition().toPoint());
     }
 
     QDialog::mouseReleaseEvent(event);

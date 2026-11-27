@@ -89,7 +89,7 @@ link quietly.
 First-party tests use Qt Test and live in `Tests/`. Name a test file after the unit under
 test, such as `AirPodsStateManagerTests.cpp`, and register it in `Tests/CMakeLists.txt`.
 
-Every change must at minimum compile in Win32 `RelWithDebInfo`. Logic changes need a test.
+Every change must at minimum compile in x64 `RelWithDebInfo`. Logic changes need a test.
 Bluetooth, tray, media and settings flows are not covered by automation — exercise them by
 hand and say in the pull request which ones you checked.
 

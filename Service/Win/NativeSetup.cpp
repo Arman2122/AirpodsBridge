@@ -222,6 +222,30 @@ std::string ComputeSha256Hex(std::span<const uint8_t> data)
     return hex;
 }
 
+bool IsArm64Host() noexcept
+{
+#if defined(_M_ARM64)
+    return true;
+#else
+    using IsWow64Process2Fn = BOOL(WINAPI *)(HANDLE, USHORT *, USHORT *);
+    if (const HMODULE k32 = GetModuleHandleW(L"kernel32.dll"); k32 != nullptr) {
+        if (const auto fn =
+                reinterpret_cast<IsWow64Process2Fn>(GetProcAddress(k32, "IsWow64Process2"));
+            fn != nullptr)
+        {
+            USHORT processMachine = 0;
+            USHORT nativeMachine = 0;
+            if (fn(GetCurrentProcess(), &processMachine, &nativeMachine)) {
+                return nativeMachine == IMAGE_FILE_MACHINE_ARM64;
+            }
+        }
+    }
+    SYSTEM_INFO si{};
+    GetNativeSystemInfo(&si);
+    return si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64;
+#endif
+}
+
 bool DownloadAndInstallUsbipWin2(bool &rebootNeeded, std::string &errOut)
 {
     rebootNeeded = false;
@@ -230,7 +254,12 @@ bool DownloadAndInstallUsbipWin2(bool &rebootNeeded, std::string &errOut)
         return true;
     }
 
-    WriteProgress("running", 18, "Checking latest Microsoft-signed usbip-win2 release...");
+    const bool arm64 = IsArm64Host();
+    const char *archTag = arm64 ? "arm64" : "x64";
+
+    WriteProgress(
+        "running", 18,
+        std::string{"Checking latest Microsoft-signed usbip-win2 ("} + archTag + ") release...");
     std::vector<uint8_t> jsonBytes;
     if (!HttpGetToBuffer(
             L"https://api.github.com/repos/vadimgrn/usbip-win2/releases/latest", jsonBytes, errOut))
@@ -240,12 +269,15 @@ bool DownloadAndInstallUsbipWin2(bool &rebootNeeded, std::string &errOut)
 
     const std::string json{reinterpret_cast<const char *>(jsonBytes.data()), jsonBytes.size()};
 
-    // Find the x64 installer asset URL and optional GitHub SHA-256 digest.
-    static const std::regex kUrlRe{
-        R"re("browser_download_url"\s*:\s*"(https://github\.com/vadimgrn/usbip-win2/releases/download/[^"]+/USBip-[^"]+-x64\.exe)")re"};
+    // Find the matching architecture (x64 or arm64) installer asset URL and optional SHA-256.
+    const std::regex urlRe{
+        arm64
+            ? R"re("browser_download_url"\s*:\s*"(https://github\.com/vadimgrn/usbip-win2/releases/download/[^"]+/USBip-[^"]+-arm64\.exe)")re"
+            : R"re("browser_download_url"\s*:\s*"(https://github\.com/vadimgrn/usbip-win2/releases/download/[^"]+/USBip-[^"]+-x64\.exe)")re"};
     std::smatch urlMatch;
-    if (!std::regex_search(json, urlMatch, kUrlRe)) {
-        errOut = "Could not locate x64 installer in vadimgrn/usbip-win2 release metadata.";
+    if (!std::regex_search(json, urlMatch, urlRe)) {
+        errOut = std::string{"Could not locate "} + archTag +
+                 " installer in vadimgrn/usbip-win2 release metadata.";
         return false;
     }
     const std::string downloadUrl = urlMatch[1].str();
@@ -296,7 +328,8 @@ bool DownloadAndInstallUsbipWin2(bool &rebootNeeded, std::string &errOut)
     wchar_t tempDir[MAX_PATH]{};
     GetTempPathW(MAX_PATH, tempDir);
     const std::filesystem::path installerPath =
-        std::filesystem::path{tempDir} / L"AirpodsBridge-USBip-x64.exe";
+        std::filesystem::path{tempDir} /
+        (arm64 ? L"AirpodsBridge-USBip-arm64.exe" : L"AirpodsBridge-USBip-x64.exe");
     {
         std::ofstream out{installerPath, std::ios::out | std::ios::trunc | std::ios::binary};
         if (!out.is_open()) {
@@ -419,7 +452,10 @@ int NativeSetup::RunEnable()
     if (search.status == AdapterSearchStatus::NonUsbOnly) {
         WriteProgress(
             "error", 100,
-            "Your Bluetooth adapter uses UART/SDIO rather than USB and cannot be proxied.");
+            "Your internal Bluetooth radio uses UART/SDIO rather than USB (common on "
+            "Snapdragon/ARM laptops) and cannot be proxied. BLE battery and ear detection work "
+            "natively; connect a USB Bluetooth adapter to enable two-way ANC and Heart Rate "
+            "controls.");
         return 1;
     }
     if (search.status != AdapterSearchStatus::Found || !search.adapter.has_value()) {
@@ -434,7 +470,10 @@ int NativeSetup::RunEnable()
         return 1;
     }
 
-    WriteProgress("running", 78, "Registering native x64 AirpodsBridgeService...");
+    WriteProgress(
+        "running", 78,
+        std::string{"Registering native "} + (IsArm64Host() ? "ARM64" : "x64") +
+            " AirpodsBridgeService...");
 
     UniqueScHandle scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS)};
     if (!scm.Valid()) {

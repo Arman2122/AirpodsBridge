@@ -7,6 +7,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Upgraded to Qt 6.8.3 LTS and native 64-bit Windows (`x64` & `ARM64`) architecture**
+  (`CMakeLists.txt`, `CMakePresets.json`, `Source/Config.h.in`, `Tests/CMakeLists.txt`,
+  `.github/workflows/windows.yml`, `ThirdParty/Qt/README.md`):
+  - Replaced legacy 32-bit `Win32` / Qt 5.15.2 builds with native **Windows `x64`** (`win-x64`) and
+    native **Windows `ARM64`** (`win-arm64`) releases built against **Qt 6.8.3 LTS** (with
+    `qtimageformats` for `.webp` Apple device artwork), eliminating WOW64 emulation on x64 and
+    Prism emulation on Snapdragon/Windows on ARM laptops.
+  - Ported all Qt 5 APIs cleanly to Qt 6 (`qintptr*` native event filters, `QEnterEvent*`,
+    `globalPosition()`, `position()`, `QFontDatabase::families()`,
+    `QStandardPaths::AppLocalDataLocation`, `Qt::SkipEmptyParts`, and removed deprecated high-DPI
+    and context-help attributes).
+  - Trimmed ~39 MB of unused Mesa software OpenGL and DirectX HLSL shader compiler DLLs from
+    `windeployqt` deployment (`--no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler`)
+    and added cross-compile `QT_HOST_PATH` + `qtpaths6.bat` support for ARM64 deployment.
+  - Added running architecture display (`x64` / `arm64`) to **Settings → About** and to
+    `--status` / diagnostic clipboard JSON (`arch`, `platform`).
+
+### Added
+
+- **First-class Windows `ARM64` support across the app, updater, installer, and Control Engine**
+  (`Source/Core/Update.cpp`, `Tests/AirPodsDomainTests.cpp`, `CMake/NSIS.template.in`,
+  `Service/Win/NativeSetup.cpp`, `Service/Win/RadioEngine.cpp`, `Service/Win/ServiceMain.cpp`,
+  `Source/Core/AirPodsServiceTransport_win.cpp`, `Tools/Setup-RadioService.ps1`):
+  - Strict architecture-matching in-app updater (`-win-x64.exe` vs `-win-arm64.exe`), covered by
+    cross-architecture unit tests in `AirPodsDomainTests`.
+  - 64-bit NSIS installer (`SetRegView 64` + 64-bit OS guard) that detects and cleanly replaces
+    both legacy 32-bit `v1.x` per-user installs and older machine-wide installs in place so legacy
+    Qt 5 DLLs are removed while user settings in `HKCU` stay intact.
+  - Architecture-aware `AirpodsBridgeService` (`x64` & `ARM64`) that automatically downloads and
+    SHA-256 verifies the official Microsoft-signed `USBip-*-arm64.exe` (or `USBip-*-x64.exe`)
+    release from `vadimgrn/usbip-win2`, with clear messaging when an ARM/Snapdragon laptop's
+    internal Bluetooth radio uses UART/SDIO instead of USB.
+  - Dual-architecture GitHub Actions CI matrix (`x64` native with full `ctest` + `arm64`
+    cross-compiled) with automated PE machine header and Qt 6 plugin verification (`0x8664` /
+    `0xAA64`) and unified `SHA256SUMS.txt` release packaging.
+
 ### Documentation
 
 - Published the GitHub Wiki and added issue forms for bugs, feature requests, and new device support.

@@ -233,7 +233,7 @@ void Register()
         }
     }
 
-    const auto installed = QFontDatabase{}.families();
+    const auto installed = QFontDatabase::families();
     g_textFamily = FirstAvailable(installed, kTextPreference);
     g_displayFamily = FirstAvailable(installed, kDisplayPreference);
 

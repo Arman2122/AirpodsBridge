@@ -61,7 +61,7 @@ protected:
         DrawX(painter);
     }
 
-    void enterEvent(QEvent *event) override
+    void enterEvent(QEnterEvent *event) override
     {
         Q_UNUSED(event);
         _isHovering = true;
@@ -215,7 +215,7 @@ protected:
         painter.drawEllipse(QPointF{c.x() + 2.0, c.y() + 2.8}, 2.0, 2.0);
     }
 
-    void enterEvent(QEvent *event) override
+    void enterEvent(QEnterEvent *event) override
     {
         Q_UNUSED(event);
         _isHovering = true;
@@ -1109,7 +1109,7 @@ void MainWindow::paintEvent(QPaintEvent *event)
     Q_UNUSED(colours);
 }
 
-void MainWindow::enterEvent(QEvent *event)
+void MainWindow::enterEvent(QEnterEvent *event)
 {
     QDialog::enterEvent(event);
     _isHovered = true;

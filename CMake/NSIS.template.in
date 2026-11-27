@@ -31,6 +31,7 @@ Unicode true
 ; From CPack
 
 !define VERSION "@CPACK_PACKAGE_VERSION@"
+!define TARGET_ARCH "@CPACK_NSIS_APB_TARGET_ARCH@"
 !define INST_DIR "@CPACK_TEMPORARY_DIRECTORY@"
 !define APP_NAME "@CPACK_NSIS_PACKAGE_NAME@"
 !define APP_EXE "@CPACK_NSIS_INSTALLED_ICON_NAME@"
@@ -70,6 +71,7 @@ VIAddVersionKey "LegalCopyright" "@CPACK_NSIS_CONTACT@"
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
+!include "x64.nsh"
 
 @CPACK_NSIS_INSTALLER_MUI_ICON_CODE@
 
@@ -86,7 +88,7 @@ VIAddVersionKey "LegalCopyright" "@CPACK_NSIS_CONTACT@"
 ; Pages
 
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${APP_NAME}"
-!define MUI_WELCOMEPAGE_TEXT "AirPods battery, ear detection and quick connect, in the Windows notification area.$\r$\n$\r$\nThis installs ${APP_NAME} ${VERSION} for your account only. It needs no administrator rights, and updates install the same way.$\r$\n$\r$\n$_CLICK"
+!define MUI_WELCOMEPAGE_TEXT "AirPods battery, ear detection and quick connect, in the Windows notification area.$\r$\n$\r$\nThis installs ${APP_NAME} ${VERSION} (${TARGET_ARCH}) for your account only. It needs no administrator rights, and updates install the same way.$\r$\n$\r$\n$_CLICK"
 !insertmacro MUI_PAGE_WELCOME
 
 @CPACK_NSIS_LICENSE_PAGE@
@@ -149,12 +151,10 @@ Function RunPreviousUninstaller
   ${EndIf}
 FunctionEnd
 
-Function .onInit
-  SetShellVarContext current
-
-  ; A copy installed for all users predates this installer and lives in Program Files.
-  ; Two copies would fight over the tray, so it has to go first; its uninstaller asks
-  ; Windows for permission on its own.
+; Scans HKLM\...\Uninstall in the active registry view for an all-users copy of AirpodsBridge
+; (from older 32-bit or 64-bit machine-wide installers) and removes it first.
+!macro CheckAllUsersCopy RegView
+  SetRegView ${RegView}
   StrCpy $2 0
   ${Do}
     EnumRegKey $3 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall" $2
@@ -180,10 +180,29 @@ Function .onInit
     ${EndIf}
     IntOp $2 $2 + 1
   ${Loop}
+!macroend
+
+Function .onInit
+  ${IfNot} ${RunningX64}
+    MessageBox MB_OK|MB_ICONSTOP "${APP_NAME} ${VERSION} (${TARGET_ARCH}) requires 64-bit Windows (x64 or ARM64)."
+    Abort
+  ${EndIf}
+
+  SetShellVarContext current
+
+  ; A copy installed for all users predates this installer and lives in Program Files.
+  ; Check both 64-bit and legacy 32-bit (WOW6432Node) registry views so either edition is
+  ; removed cleanly before this per-user 64-bit copy installs.
+  !insertmacro CheckAllUsersCopy 64
+  !insertmacro CheckAllUsersCopy 32
+  SetRegView 64
 FunctionEnd
 
 Function un.onInit
   SetShellVarContext current
+  ${If} ${RunningX64}
+    SetRegView 64
+  ${EndIf}
 FunctionEnd
 
 ;--------------------------------
@@ -191,10 +210,13 @@ FunctionEnd
 
 Section "-Install"
   SetShellVarContext current
+  SetRegView 64
   !insertmacro CloseRunningInstance
 
-  ; Replace a previous per-user copy only after the user has confirmed installation, so
-  ; cancelling the wizard leaves an existing installation intact.
+  ; Replace a previous per-user copy (including legacy 32-bit v1.x installs) only after
+  ; the user has confirmed installation, so cancelling the wizard leaves an existing
+  ; installation intact. Running the prior uninstaller removes legacy Qt 5 / 32-bit DLLs
+  ; before writing the native 64-bit Qt 6 files while keeping HKCU user settings intact.
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "UninstallString"
   ${If} $0 != ""
     ReadRegStr $1 HKCU "${INSTALLER_KEY}" ""
@@ -240,6 +262,9 @@ SectionEnd
 
 Section "Uninstall"
   SetShellVarContext current
+  ${If} ${RunningX64}
+    SetRegView 64
+  ${EndIf}
   !insertmacro CloseRunningInstance
 
   @CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS@

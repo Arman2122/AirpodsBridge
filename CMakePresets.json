@@ -11,7 +11,7 @@
       "hidden": true,
       "generator": "Visual Studio 17 2022",
       "architecture": {
-        "value": "Win32",
+        "value": "x64",
         "strategy": "set"
       },
       "binaryDir": "${sourceDir}/Build/${presetName}",
@@ -23,8 +23,8 @@
     {
       "name": "dev",
       "inherits": "windows-base",
-      "displayName": "Developer build",
-      "description": "Tests enabled and a console attached, so log output is visible.",
+      "displayName": "Developer build (x64)",
+      "description": "Native x64 build with tests enabled and a console attached.",
       "cacheVariables": {
         "APB_BUILD_TESTS": "ON",
         "APB_ENABLE_CONSOLE": "ON"
@@ -33,18 +33,29 @@
     {
       "name": "release",
       "inherits": "windows-base",
-      "displayName": "Release build",
-      "description": "What a tagged build produces: tests plus the NSIS installer.",
+      "displayName": "Release build (x64)",
+      "description": "Native x64 release build with tests and the NSIS installer.",
       "cacheVariables": {
         "APB_BUILD_TESTS": "ON",
         "APB_GENERATE_INSTALLER": "ON"
       }
     },
     {
-      "name": "vs2019",
-      "inherits": "dev",
-      "displayName": "Developer build (Visual Studio 2019)",
-      "generator": "Visual Studio 16 2019"
+      "name": "release-arm64",
+      "inherits": "windows-base",
+      "displayName": "Release build (ARM64)",
+      "description": "Native ARM64 release build cross-compiled with Qt 6 ARM64 + QT_HOST_PATH.",
+      "architecture": {
+        "value": "ARM64",
+        "strategy": "set"
+      },
+      "cacheVariables": {
+        "QT_HOST_PATH": "$env{QT_HOST_PATH}",
+        "VCPKG_TARGET_TRIPLET": "arm64-windows",
+        "VCPKG_HOST_TRIPLET": "x64-windows",
+        "APB_BUILD_TESTS": "OFF",
+        "APB_GENERATE_INSTALLER": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -64,8 +75,8 @@
       "configuration": "RelWithDebInfo"
     },
     {
-      "name": "vs2019",
-      "configurePreset": "vs2019",
+      "name": "release-arm64",
+      "configurePreset": "release-arm64",
       "configuration": "RelWithDebInfo"
     }
   ],
@@ -81,14 +92,6 @@
     {
       "name": "release",
       "configurePreset": "release",
-      "configuration": "RelWithDebInfo",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "vs2019",
-      "configurePreset": "vs2019",
       "configuration": "RelWithDebInfo",
       "output": {
         "outputOnFailure": true

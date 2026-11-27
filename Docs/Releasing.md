@@ -1,8 +1,9 @@
 # Releasing
 
-GitHub Actions builds and tests every push to `main` and every pull request. A tag matching
-`v*.*.*` additionally publishes a GitHub Release containing the NSIS installer, a portable
-ZIP, and `SHA256SUMS.txt`.
+GitHub Actions builds both native **Windows `x64`** (with full `ctest` suite) and native
+**Windows `ARM64`** (cross-compiled) on every push to `main` and every pull request. A tag matching
+`v*.*.*` additionally publishes a GitHub Release containing the NSIS installers and portable ZIPs
+for both architectures plus a unified `SHA256SUMS.txt`.
 
 ## Versioning
 
@@ -21,7 +22,7 @@ Release tags are always `vX.Y.Z`. The workflow rejects a tag in any other form.
 1. Update the version in `CMakeLists.txt` and `vcpkg.json`.
 2. Move the `Unreleased` entries in [`CHANGELOG.md`](/CHANGELOG.md) under a new heading for
    the version, dated.
-3. Build and test Win32 `RelWithDebInfo` locally:
+3. Build and test native x64 `RelWithDebInfo` locally:
 
    ```powershell
    cmake --preset release
@@ -35,20 +36,23 @@ Release tags are always `vX.Y.Z`. The workflow rejects a tag in any other form.
    ```powershell
    git switch main
    git pull --ff-only
-   git tag -a v1.0.0 -m "Release v1.0.0"
-   git push origin v1.0.0
+   git tag -a v2.0.0 -m "Release v2.0.0"
+   git push origin v2.0.0
    ```
 
-Do not rename or manually upload the installer: the updater selects an `.exe` asset whose
-name contains `win32`.
+Do not rename or manually upload the installers: the in-app updater strictly matches the asset
+ending with `-%1.exe` for the running binary's platform tag (`-win-x64.exe` on x64,
+`-win-arm64.exe` on ARM64).
 
 ## Verify a release
 
-Confirm the workflow completed, then download the installer and compare its digest with
-`SHA256SUMS.txt`:
+Confirm the workflow completed, then download the installer for your architecture and compare its
+digest with `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\AirpodsBridge-1.0.0-win32.exe -Algorithm SHA256
+Get-FileHash .\AirpodsBridge-2.0.0-win-x64.exe -Algorithm SHA256
+# or on Windows on ARM:
+Get-FileHash .\AirpodsBridge-2.0.0-win-arm64.exe -Algorithm SHA256
 ```
 
 The automated workflow publishes releases immediately. Keep one as a draft only when manual
@@ -71,13 +75,13 @@ application icon: run `python Tools/generate_installer_art.py` after changing th
 commit the result. Never edit the bitmaps by hand.
 
 The portable ZIP is the installer's own staging tree,
-`Build/Release/Installer/_CPack_Packages/win32/NSIS/AirpodsBridge-<version>-win32/`, zipped by
-the workflow.
+`Build/Release/Installer/_CPack_Packages/<platform>/NSIS/AirpodsBridge-<version>-<platform>/`
+(where `<platform>` is `win-x64` or `win-arm64`), zipped by the workflow.
 
 To exercise the installer without clicking through it:
 
 ```powershell
-.\AirpodsBridge-1.0.0-win32.exe /S /D=C:\Temp\AirpodsBridge
+.\AirpodsBridge-2.0.0-win-x64.exe /S /D=C:\Temp\AirpodsBridge
 C:\Temp\AirpodsBridge\Uninstall.exe /S
 ```
 

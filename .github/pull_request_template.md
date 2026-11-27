@@ -8,8 +8,8 @@
 
 <!-- List the checks you ran and their results. For checks that did not apply or could not be run, say so. -->
 
-- **Build and tests:** <!-- Win32 RelWithDebInfo via the dev preset, ctest, and formatting for C++ changes. Include the x64 service build when affected. -->
-- **Manual verification:** <!-- For Bluetooth, tray, audio, or settings, include Windows build, device, BLE or Control Engine mode, and what you exercised. -->
+- **Build and tests:** <!-- x64 RelWithDebInfo via the dev preset, ctest, and formatting for C++ changes. Include the x64/ARM64 service build when affected. -->
+- **Manual verification:** <!-- For Bluetooth, tray, audio, or settings, include Windows build, architecture (x64/ARM64), device, BLE or Control Engine mode, and what you exercised. -->
 
 ## Review notes
 

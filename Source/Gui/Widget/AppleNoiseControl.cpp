@@ -614,7 +614,7 @@ void AppleNoiseControl::mouseMoveEvent(QMouseEvent *event)
     if (!isEnabled()) {
         return;
     }
-    const QPointF pos = event->localPos();
+    const QPointF pos = event->position();
     if (_dragging) {
         _thumbVisible = true;
         _thumbAnimation.stop();
@@ -641,7 +641,7 @@ void AppleNoiseControl::mousePressEvent(QMouseEvent *event)
         return;
     }
     _keyboardFocus = false;
-    const QPointF pos = event->localPos();
+    const QPointF pos = event->position();
     const QRectF capsuleHit =
         CapsuleRect().adjusted(0.0, 0.0, 0.0, kCapsuleLabelGap + kCapsuleLabelHeight);
     if (capsuleHit.contains(pos)) {
@@ -666,7 +666,7 @@ void AppleNoiseControl::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
     _keyboardFocus = false;
-    const QPointF pos = event->localPos();
+    const QPointF pos = event->position();
 
     if (_dragging) {
         _dragging = false;

@@ -366,7 +366,11 @@ int wmain(int argc, wchar_t *argv[])
         if (arg == L"--console") {
             return RunConsoleMode();
         }
+#if defined(_M_ARM64)
+        std::printf("AirpodsBridgeService (ARM64 No-Test-Mode Bluetooth Radio Proxy)\n"
+#else
         std::printf("AirpodsBridgeService (x64 No-Test-Mode Bluetooth Radio Proxy)\n"
+#endif
                     "Usage:\n"
                     "  --install        Register Windows service (requires Admin)\n"
                     "  --uninstall      Stop service, restore native BT driver, unregister\n"

@@ -16,7 +16,7 @@ target_link_libraries(
     apb_domain
     apb_core
     apb_presentation
-    Qt5::Test
+    Qt6::Test
 )
 
 target_include_directories(AirPodsDomainTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -35,7 +35,7 @@ target_link_libraries(
 
     PRIVATE
     apb_domain
-    Qt5::Test
+    Qt6::Test
 )
 
 target_include_directories(AapProtocolTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -57,7 +57,7 @@ target_link_libraries(
     RadioServiceProtocolTests
 
     PRIVATE
-    Qt5::Test
+    Qt6::Test
 )
 
 target_include_directories(RadioServiceProtocolTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -71,7 +71,7 @@ target_link_libraries(
 
     PRIVATE
     apb_domain
-    Qt5::Test
+    Qt6::Test
 )
 
 target_include_directories(BatteryTrackerTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -86,7 +86,7 @@ target_link_libraries(
     PRIVATE
     apb_core
     apb_domain
-    Qt5::Test
+    Qt6::Test
 )
 
 target_include_directories(ProServicesTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -100,8 +100,8 @@ target_link_libraries(
 
     PRIVATE
     apb_core
-    Qt5::Test
-    Qt5::Widgets
+    Qt6::Test
+    Qt6::Widgets
 )
 
 target_include_directories(QuickConnectTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -116,7 +116,7 @@ target_link_libraries(
     PRIVATE
     apb_domain
     apb_core
-    Qt5::Test
+    Qt6::Test
 )
 
 target_include_directories(AutomationTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -131,8 +131,8 @@ target_link_libraries(
     PRIVATE
     apb_domain
     apb_presentation
-    Qt5::Gui
-    Qt5::Test
+    Qt6::Gui
+    Qt6::Test
 )
 
 target_include_directories(DeviceArtworkTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -150,8 +150,8 @@ target_link_libraries(
 
     PRIVATE
     apb_presentation
-    Qt5::Gui
-    Qt5::Test
+    Qt6::Gui
+    Qt6::Test
 )
 
 target_include_directories(ThemeTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -168,8 +168,8 @@ target_link_libraries(
 
     PRIVATE
     apb_gui
-    Qt5::Widgets
-    Qt5::Test
+    Qt6::Widgets
+    Qt6::Test
 )
 
 target_include_directories(FrameClockTests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -188,7 +188,7 @@ target_link_libraries(
     apb_gui
     apb_core
     apb_presentation
-    Qt5::Widgets
+    Qt6::Widgets
 )
 
 target_include_directories(SettingsPreview PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -209,7 +209,7 @@ target_link_libraries(
     apb_gui
     apb_core
     apb_presentation
-    Qt5::Widgets
+    Qt6::Widgets
 )
 
 target_include_directories(PopupPreview PRIVATE "${CMAKE_SOURCE_DIR}")

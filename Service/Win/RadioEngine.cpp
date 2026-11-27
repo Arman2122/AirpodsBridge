@@ -418,7 +418,9 @@ void RadioEngine::RunTakeoverCycle()
     if (search.status == AdapterSearchStatus::NonUsbOnly) {
         SetState(
             Protocol::RadioServiceState::NonUsbAdapterOnly,
-            "Bluetooth adapter is connected over UART/SDIO rather than USB and cannot be proxied.");
+            "Internal Bluetooth adapter uses UART/SDIO rather than USB (common on Snapdragon/ARM "
+            "laptops). BLE battery and ear detection work natively; connect a USB Bluetooth "
+            "adapter for two-way ANC and Heart Rate controls.");
         std::unique_lock<std::mutex> lock{_stateMutex};
         _supervisorCv.wait_for(lock, std::chrono::seconds(15), [&] { return !_running.load(); });
         return;

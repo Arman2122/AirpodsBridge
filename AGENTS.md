@@ -6,7 +6,7 @@ the things that are easy to get wrong here.
 
 ## 1. What this project is
 
-A Qt 5, C++20 tray application for Windows. It decodes the Bluetooth Low Energy
+A Qt 6, C++20 tray application for 64-bit Windows (`x64` and `ARM64`). It decodes the Bluetooth Low Energy
 proximity-pairing advertisements AirPods broadcast, and shows battery and in-ear state in
 the notification area.
 
@@ -20,7 +20,7 @@ These are settled. Do not "fix" them, and do not reintroduce what was removed.
 | Constraint | Detail |
 | --- | --- |
 | **Windows only** | Platform code uses the `_win.cpp` / `_win.h` suffix and `APB_OS_WIN`. No other port is maintained. |
-| **32-bit only** | `-A Win32` belongs on the *configure* line. The build is verified only against Qt 5.15.2 `win32_msvc2019`. |
+| **64-bit only (x64 & ARM64)** | Native `-A x64` (Qt 6.8.3 `win64_msvc2022_64`) and native `-A ARM64` (Qt 6.8.3 `win64_msvc2022_arm64_cross_compiled` + `QT_HOST_PATH`, both with `qtimageformats` for `.webp` artwork). 32-bit x86 builds are not maintained. |
 | **English only** | No `.ts` catalogues, no `QTranslator`, no localisation machinery. `tr()` call sites remain because Qt resolves them to the source English text — leave them alone, and do not add localisation back. |
 | **`AirPods` is a device name** | Never treat it as a branding token to be renamed. |
 | **Generated assets** | `Source/Resource/Image/Icon.svg` and `Icon.ico` are output of `Tools/generate_icon.py`; `Source/Resource/Installer/*.bmp` are output of `Tools/generate_installer_art.py`; everything under `Source/Resource/Device/` except `NOTICE.txt` is output of `Tools/apple_device_assets.py`. Edit the generators, never the assets. |
@@ -104,7 +104,7 @@ Requires `VCPKG_ROOT` and `QT_ROOT_DIR` in the environment. `ctest` needs the Qt
 directory on `PATH`. Full details and troubleshooting are in
 [Docs/Building.md](Docs/Building.md).
 
-Every change must at minimum compile in Win32 `RelWithDebInfo`. Logic changes need a test
+Every change must at minimum compile in x64 `RelWithDebInfo`. Logic changes need a test
 in `Tests/`, registered in `Tests/CMakeLists.txt`.
 
 **What automation cannot check.** Bluetooth, tray, media and settings flows have no

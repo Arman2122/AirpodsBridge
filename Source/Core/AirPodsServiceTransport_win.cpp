@@ -51,8 +51,13 @@ std::filesystem::path FindServiceBinaryPath()
             if (std::filesystem::is_regular_file(direct, ec)) {
                 return direct;
             }
+#if defined(_M_ARM64)
+            const auto built =
+                dir / L"Build" / L"service-arm64" / L"Binary" / L"AirpodsBridgeService.exe";
+#else
             const auto built =
                 dir / L"Build" / L"service-x64" / L"Binary" / L"AirpodsBridgeService.exe";
+#endif
             if (std::filesystem::is_regular_file(built, ec)) {
                 return built;
             }
@@ -132,7 +137,7 @@ void ServiceControlTransport::RunElevatedSetupAsync(
 {
     const auto serviceExe = FindServiceBinaryPath();
     if (serviceExe.empty()) {
-        LOG(Warn, "ServiceControlTransport: AirpodsBridgeService.exe (x64) not found.");
+        LOG(Warn, "ServiceControlTransport: AirpodsBridgeService.exe not found.");
         if (onComplete) {
             onComplete(SetupOutcome{
                 .succeeded = false,

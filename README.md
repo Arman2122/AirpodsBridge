@@ -11,7 +11,7 @@ Two-way noise control, optical heart rate, ultra-low-latency audio, and Liquid G
 [![Lint](https://github.com/Arman2122/AirpodsBridge/actions/workflows/lint.yml/badge.svg)](https://github.com/Arman2122/AirpodsBridge/actions/workflows/lint.yml)
 [![Release](https://img.shields.io/github/v/release/Arman2122/AirpodsBridge?include_prereleases&sort=semver)](https://github.com/Arman2122/AirpodsBridge/releases)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20(x64%20%7C%20ARM64)-0078D4.svg)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)
 ![Models](https://img.shields.io/badge/supported%20models-31-34C759.svg)
 
@@ -24,7 +24,7 @@ Two-way noise control, optical heart rate, ultra-low-latency audio, and Liquid G
 Windows pairs with AirPods as generic Bluetooth headphones and leaves the best parts behind — no battery readout, no ear detection, no noise control, no heart rate telemetry, and unpredictable audio routing. **AirpodsBridge** brings those capabilities natively to Windows in a lightweight C++20 desktop application engineered around zero idle CPU.
 
 - **Works out of the box (BLE mode):** Zero drivers, zero elevated permissions, and zero Apple account required. Reads Apple Continuity BLE broadcasts for battery levels, ear detection, media automation, nearby popups, and one-click connect while leaving standard Windows pairing untouched.
-- **Unlocks full two-way hardware control (Control Engine):** An optional native x64 Radio Proxy Service enables live Apple Accessory Protocol (AAP) controls — **without enabling Windows Test Mode and without disabling Secure Boot**.
+- **Unlocks full two-way hardware control (Control Engine):** An optional native 64-bit (`x64` / `ARM64`) Radio Proxy Service enables live Apple Accessory Protocol (AAP) controls — **without enabling Windows Test Mode and without disabling Secure Boot**.
 
 <p align="center">
   <img src="Docs/Images/Popup.png" alt="AirpodsBridge Liquid Glass popup in light and dark mode showing AirPods Pro 3 with battery rings, continuous Adaptive Audio slider, quick controls, and compact Heart Rate bar" width="760">
@@ -72,7 +72,7 @@ For optical PPG models (**AirPods Pro 3** and **Powerbeats Pro 2**), AirpodsBrid
 
 - **Instant Connect & automatic output switching** — Cached A2DP-first reconnection with automatic playback switching on connect or wear (`Switch audio on connect`, `Switch output when worn`), idempotent Windows audio-role routing, a `160 ms` silent A2DP wake pulse so audio starts reliably every time, and automatic restore to your speakers or headset on disconnect.
 - **Hands-Free (HFP) protection** — Detects which application triggered muffled 16 kHz mono call audio (shown inline in the popup), locks Windows' default capture device to a chosen desktop microphone, optionally blocks AirPods HFP links at the Bluetooth HCI layer, or exposes a stereo-safe virtual USB microphone.
-- **Ultra-low-latency audio suite** — Wear-aware `3.0 ms` `IAudioClient3` shared-mode A2DP keep-alive (down from Windows' `10.0 ms` default, released immediately when taken off), a native zero-PowerShell **`Music (AAC)` / `Gaming (SBC)`** switcher with live `IPolicyConfig` APO bypass (`Disable_SysFx`), and Apple-aligned `11.25 ms` HCI polling (55% faster than stock Windows' `25 ms` while keeping Left/Right ANC transitions synchronized).
+- **Ultra-low-latency audio suite** — Wear-aware `3.0 ms` `IAudioClient3` shared-mode A2DP keep-alive (down from Windows' `10.0 ms` default, released immediately when taken off), a native zero-PowerShell **`Music (AAC)` / `Gaming (SBC)`** switcher with live `IPolicyConfig` APO bypass (`Disable_SysFx`), and A2DP-safe `25.0 ms` HCI polling that keeps Apple H2 Left/Right inter-bud links synchronized cleanly.
 - **Reconnect volume limiter** — Caps AirPods playback volume automatically on connect so audio never blasts unexpectedly.
 
 ### Everyday Automation & Native Polish
@@ -82,14 +82,14 @@ For optical PPG models (**AirPods Pro 3** and **Powerbeats Pro 2**), AirpodsBrid
 | **Apple 3D artwork** | Genuine Apple renders and 60 fps loops across **all 31 AirPods & Beats models**, in native colourways where Apple publishes them. See [Artwork](Docs/Artwork.md). |
 | **Nearby other-device popup** | Detects your AirPods nearby even while connected to an iPhone or iPad, showing live battery rings and a one-click **Connect** button. |
 | **Automatic ear detection** | Pauses all active Windows media sessions on removal and optionally resumes on reinsertion, with single-bud mode and pause-on-disconnect protection. |
-| **Battery intelligence** | Observed remaining listening-time estimates (`~3h 40m left`), asymmetric drain / dirty charging-pin warnings, configurable low-battery alerts, optional 100% full-charge alerts, tray icon badge, and taskbar battery readout. |
+| **Battery intelligence** | Asymmetric drain / dirty charging-pin warnings, configurable low-battery alerts, optional 100% full-charge alerts, tray icon badge, and taskbar battery readout. |
 | **Display-rate motion & themes** | `Gui::FrameClock` drives every animation at your display's exact refresh rate (60 Hz to 480 Hz) and ticks zero times while idle. Follows Windows Light/Dark mode live across every window, menu, taskbar widget, and title bar. |
 | **Global shortcuts & IPC** | System-wide hotkeys for connect/disconnect, popup toggle, and Noise Control cycling, plus a local Named Pipe CLI for Stream Deck, AutoHotkey, PowerToys, and scripts. |
 | **Zero-idle-CPU discipline** | Hardware-filtered passive BLE scanning, lazy timers, zero polling loops, and sleep/Modern Standby & `explorer.exe` recovery. See [Performance](Docs/Performance.md). |
 
 ## No-Test-Mode Control Engine
 
-Windows does not expose Classic Bluetooth (BR/EDR) L2CAP sockets to user-mode apps, which AirPods require for two-way AAP (`PSM 0x1001`). Instead of shipping an unsigned custom kernel driver that forces Windows into Test Mode, **AirpodsBridgeService** (native x64 C++20, zero external runtimes) combines three Microsoft-signed building blocks:
+Windows does not expose Classic Bluetooth (BR/EDR) L2CAP sockets to user-mode apps, which AirPods require for two-way AAP (`PSM 0x1001`). Instead of shipping an unsigned custom kernel driver that forces Windows into Test Mode, **AirpodsBridgeService** (native `x64` / `ARM64` C++20, zero external runtimes) combines three Microsoft-signed building blocks:
 
 1. **Windows inbox `WinUSB`** binds to your physical USB Bluetooth adapter.
 2. **Microsoft-signed [`usbip-win2`](https://github.com/vadimgrn/usbip-win2)** presents a virtual copy of that adapter back to Windows' standard Bluetooth stack (`BTHPORT`), so pairing and all other Bluetooth devices keep working normally.
@@ -106,23 +106,25 @@ Windows does not expose Classic Bluetooth (BR/EDR) L2CAP sockets to user-mode ap
 
 | Mode | Requirements |
 | --- | --- |
-| **Standard (BLE)** | Windows 10 (1809+) or Windows 11, any Bluetooth Low Energy adapter, AirPods/Beats paired through standard Windows Bluetooth settings. |
-| **Control Engine (Optional Two-Way AAP)** | 64-bit Windows 10/11, a USB-attached Bluetooth adapter (covers virtually all Intel, MediaTek, Realtek, and desktop PCIe/USB Bluetooth cards; UART/SDIO-only radios stay in BLE mode), and Microsoft-signed `usbip-win2` (automatically guided during in-app setup). Secure Boot stays **ON**. |
+| **Standard (BLE)** | 64-bit Windows 10 (1809+) or Windows 11 (**x64** or **ARM64**), any Bluetooth Low Energy adapter, AirPods/Beats paired through standard Windows Bluetooth settings. |
+| **Control Engine (Optional Two-Way AAP)** | 64-bit Windows 10/11 (**x64** or **ARM64**), a USB-attached Bluetooth adapter (covers virtually all Intel, MediaTek, Realtek, and desktop PCIe/USB Bluetooth cards; Snapdragon/ARM laptops with internal UART/SDIO Bluetooth work natively in BLE mode or with a USB Bluetooth adapter for Control Engine), and Microsoft-signed `usbip-win2` (`x64` or `arm64`, automatically downloaded and verified during in-app setup). Secure Boot stays **ON**. |
 
 ## Install
 
-Download the latest release from the [GitHub Releases page](https://github.com/Arman2122/AirpodsBridge/releases).
+Download the latest release for your Windows architecture from the [GitHub Releases page](https://github.com/Arman2122/AirpodsBridge/releases).
 
-| Asset | When to use it |
-| --- | --- |
-| `AirpodsBridge-<version>-win32.exe` | Standard per-user installer (`%LOCALAPPDATA%\Programs\AirpodsBridge`) — no administrator prompt required to install or auto-update, includes Start Menu shortcut and optional desktop shortcut. |
-| `AirpodsBridge-<version>-win32-portable.zip` | Unzip and run anywhere with no installer. Add an empty `portable` file (or `AirpodsBridge.ini`) beside `AirpodsBridge.exe` to store settings and logs in the same folder. |
-| `SHA256SUMS.txt` | Cryptographic digests for verifying downloads. |
+| Asset | Architecture | When to use it |
+| --- | :---: | --- |
+| `AirpodsBridge-<version>-win-x64.exe` | **x64** (Intel / AMD) | Standard per-user installer (`%LOCALAPPDATA%\Programs\AirpodsBridge`) — no administrator prompt required to install or auto-update, replaces older 32-bit `v1.x` copies cleanly in place while keeping settings. |
+| `AirpodsBridge-<version>-win-x64-portable.zip` | **x64** (Intel / AMD) | Unzip and run anywhere with no installer. Add an empty `portable` file (or `AirpodsBridge.ini`) beside `AirpodsBridge.exe` to store settings and logs in the same folder. |
+| `AirpodsBridge-<version>-win-arm64.exe` | **ARM64** (Snapdragon / Windows on ARM) | Native ARM64 per-user installer — zero Prism emulation, native ARM64 Qt 6 UI and Radio Proxy Service. |
+| `AirpodsBridge-<version>-win-arm64-portable.zip` | **ARM64** (Snapdragon / Windows on ARM) | Native ARM64 portable archive. |
+| `SHA256SUMS.txt` | All | Cryptographic SHA-256 digests for verifying every download. |
 
 Verify a download in PowerShell against `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\AirpodsBridge-1.1.0-win32.exe -Algorithm SHA256
+Get-FileHash .\AirpodsBridge-<version>-win-x64.exe -Algorithm SHA256
 ```
 
 > [!NOTE]
@@ -208,15 +210,15 @@ AirpodsBridge recognises **31 Apple AirPods and Beats models** by Bluetooth PID,
 
 ## Building from Source
 
-Requires **CMake 3.20+**, **Visual Studio 2019/2022** (with x86 and x64 MSVC toolsets), **Qt 5.15.2** (`win32_msvc2019`), and a full **vcpkg** clone. With `VCPKG_ROOT` and `QT_ROOT_DIR` configured:
+Requires **CMake 3.20+**, **Visual Studio 2022** (with `x64` MSVC toolset, plus `C++ ARM64 build tools` for ARM64 cross-compilation), **Qt 6.8.3 LTS** (`win64_msvc2022_64` and optionally `win64_msvc2022_arm64_cross_compiled`, both with `qtimageformats`), and a full **vcpkg** clone. With `VCPKG_ROOT` and `QT_ROOT_DIR` configured:
 
 ```powershell
-# 1. Build and test the Win32 desktop application
+# 1. Build and test the native x64 desktop application
 cmake --preset dev
 cmake --build --preset dev
 ctest --preset dev
 
-# 2. Build the native x64 No-Test-Mode Radio Proxy Service (zero external runtimes)
+# 2. Build the native No-Test-Mode Radio Proxy Service (zero external runtimes)
 cmake -S Service -B Build/service-x64 -G "Visual Studio 17 2022" -A x64
 cmake --build Build/service-x64 --config RelWithDebInfo
 ```
@@ -254,7 +256,7 @@ AirpodsBridge is **English only** and contains no localisation framework. This i
 
 | Component | License |
 | --- | --- |
-| [Qt 5.15.2](https://www.qt.io/download-qt-installer) | [LGPLv3](https://doc.qt.io/qt-5/lgpl.html) |
+| [Qt 6.8.3 LTS](https://www.qt.io/download-qt-installer) | [LGPLv3](https://doc.qt.io/qt-6/lgpl.html) |
 | [usbip-win2](https://github.com/vadimgrn/usbip-win2) *(optional runtime dependency for Control Engine)* | [GPL-3.0](https://github.com/vadimgrn/usbip-win2/blob/master/LICENSE) |
 | [spdlog](https://github.com/gabime/spdlog) | [MIT](https://github.com/gabime/spdlog/blob/v1.x/LICENSE) |
 | [cxxopts](https://github.com/jarro2783/cxxopts) | [MIT](https://github.com/jarro2783/cxxopts/blob/master/LICENSE) |

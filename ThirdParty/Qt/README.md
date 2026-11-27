@@ -1,6 +1,6 @@
 # Qt
 
-AirpodsBridge links Qt 5.15.2 dynamically and redistributes the Qt DLLs alongside the
+AirpodsBridge links Qt 6.8.3 dynamically and redistributes the Qt DLLs alongside the
 application. Qt is used under the **GNU Lesser General Public License version 3**.
 
 - [`LICENSE.LGPLv3`](LICENSE.LGPLv3) — the licence Qt is used under.
@@ -16,8 +16,8 @@ AirpodsBridge itself is under the [PolyForm Noncommercial License 1.0.0](/LICENS
   is what LGPLv3 section 4(d) asks for.
 - **Notice.** The licence texts above are installed into `Licenses/` beside the
   application, and the Settings window's About pane names Qt and links to its licence.
-- **Source.** Qt 5.15.2 sources are published by the Qt Company at
-  <https://download.qt.io/archive/qt/5.15/5.15.2/single/>. No Qt source is modified here.
+- **Source.** Qt 6.8.3 sources are published by the Qt Company at
+  <https://download.qt.io/official_releases/qt/6.8/6.8.3/single/>. No Qt source is modified here.
 
 If you change how Qt is linked — in particular if you ever link it statically — this
 arrangement no longer holds and the obligations change substantially.

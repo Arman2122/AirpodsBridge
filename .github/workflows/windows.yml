@@ -22,17 +22,14 @@ concurrency:
 
 env:
   BUILD_TYPE: RelWithDebInfo
-  QT_VERSION: 5.15.2
+  QT_VERSION: 6.8.3
 
 jobs:
-  build:
-    runs-on: windows-2022
+  prepare:
+    name: Validate version
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-
-    defaults:
-      run:
-        shell: pwsh
 
     steps:
       - name: Checkout repository
@@ -40,6 +37,7 @@ jobs:
 
       - name: Check release version
         id: version
+        shell: pwsh
         run: |
           $cmakeContents = Get-Content CMakeLists.txt -Raw
           $match = [regex]::Match(
@@ -62,60 +60,177 @@ jobs:
 
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Install Qt
+  build:
+    name: Windows (${{ matrix.arch }})
+    needs: prepare
+    runs-on: windows-2022
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cmake_arch: x64
+            platform_tag: win-x64
+            qt_arch: win64_msvc2022_64
+            qt_dir_glob: msvc2022_64
+            vcpkg_triplet: x64-windows
+            pe_machine: '0x8664'
+            cross_compile: false
+            run_tests: true
+          - arch: arm64
+            cmake_arch: ARM64
+            platform_tag: win-arm64
+            qt_arch: win64_msvc2022_arm64_cross_compiled
+            qt_dir_glob: msvc2022_arm64*
+            vcpkg_triplet: arm64-windows
+            pe_machine: '0xAA64'
+            cross_compile: true
+            run_tests: false
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Restore Qt ${{ env.QT_VERSION }} cache (${{ matrix.arch }})
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: qt-${{ env.QT_VERSION }}-${{ matrix.arch }}-imageformats-v1
+
+      - name: Install Qt ${{ env.QT_VERSION }} host tools (for ARM64 cross-compilation)
+        if: matrix.cross_compile && steps.qt-cache.outputs.cache-hit != 'true'
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
           host: windows
           target: desktop
-          arch: win32_msvc2019
-          cache: true
+          arch: win64_msvc2022_64
+          dir: ${{ runner.temp }}/Qt
+          cache: false
+          set-env: false
+
+      - name: Install Qt ${{ env.QT_VERSION }} (${{ matrix.arch }})
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: ${{ matrix.qt_arch }}
+          modules: qtimageformats
+          dir: ${{ runner.temp }}/Qt
+          cache: false
+          set-env: false
+
+      - name: Export Qt paths
+        run: |
+          $qtVersionDir = Join-Path "${{ runner.temp }}\Qt" "${{ env.QT_VERSION }}"
+          $qtRoot = Get-ChildItem -LiteralPath $qtVersionDir -Directory |
+            Where-Object Name -Like "${{ matrix.qt_dir_glob }}" |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $qtRoot) {
+            throw "Expected Qt installation matching '${{ matrix.qt_dir_glob }}' not found under $qtVersionDir"
+          }
+          "QT_ROOT_DIR=$qtRoot" >> $env:GITHUB_ENV
+          Write-Host "QT_ROOT_DIR=$qtRoot"
+
+          if ('${{ matrix.cross_compile }}' -eq 'true') {
+            $qtHost = Join-Path $qtVersionDir 'msvc2022_64'
+            if (-not (Test-Path -LiteralPath $qtHost)) {
+              throw "Expected Qt host installation not found at $qtHost"
+            }
+            "QT_HOST_PATH=$qtHost" >> $env:GITHUB_ENV
+            Write-Host "QT_HOST_PATH=$qtHost"
+          }
 
       - name: Clone and bootstrap vcpkg
         run: |
           git clone https://github.com/microsoft/vcpkg.git Build/vcpkg
           & Build/vcpkg/bootstrap-vcpkg.bat -disableMetrics
 
-      - name: Restore vcpkg binary cache
+      - name: Restore vcpkg binary cache (${{ matrix.vcpkg_triplet }})
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/Build/vcpkg-cache
-          key: vcpkg-win32-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            vcpkg-win32-
+            vcpkg-${{ matrix.vcpkg_triplet }}-
 
-      - name: Configure
+      - name: Configure (${{ matrix.arch }})
         env:
           VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/Build/vcpkg-cache
         run: |
           New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-          cmake -S . -B Build/Release `
-            -G 'Visual Studio 17 2022' `
-            -A Win32 `
-            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/Build/vcpkg/scripts/buildsystems/vcpkg.cmake `
-            -DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR `
-            -DAPB_BUILD_TESTS=ON `
-            -DAPB_GENERATE_INSTALLER=OFF `
-            -DAPB_GITHUB_OWNER=${{ github.repository_owner }} `
-            -DAPB_GITHUB_REPOSITORY=${{ github.event.repository.name }} `
-            -DAPB_BUILD_GIT_HASH=${{ github.sha }}
+          $cmakeArgs = @(
+            '-S', '.',
+            '-B', 'Build/Release',
+            '-G', 'Visual Studio 17 2022',
+            '-A', '${{ matrix.cmake_arch }}',
+            '-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/Build/vcpkg/scripts/buildsystems/vcpkg.cmake',
+            "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR",
+            '-DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}',
+            '-DVCPKG_HOST_TRIPLET=x64-windows',
+            '-DAPB_GENERATE_INSTALLER=OFF',
+            '-DAPB_GITHUB_OWNER=${{ github.repository_owner }}',
+            '-DAPB_GITHUB_REPOSITORY=${{ github.event.repository.name }}',
+            '-DAPB_BUILD_GIT_HASH=${{ github.sha }}'
+          )
+          if ('${{ matrix.cross_compile }}' -eq 'true') {
+            $cmakeArgs += "-DQT_HOST_PATH=$env:QT_HOST_PATH"
+            $cmakeArgs += '-DAPB_BUILD_TESTS=OFF'
+          }
+          else {
+            $cmakeArgs += '-DAPB_BUILD_TESTS=ON'
+          }
+          cmake @cmakeArgs
 
-      - name: Build
+      - name: Build (${{ matrix.arch }})
         run: cmake --build Build/Release --config $env:BUILD_TYPE --parallel 2
 
-      - name: Build No-Test-Mode Radio Service (x64)
+      - name: Build No-Test-Mode Radio Service (${{ matrix.arch }})
         run: |
-          cmake -S Service -B Build/ServiceRelease -G 'Visual Studio 17 2022' -A x64
+          cmake -S Service -B Build/ServiceRelease -G 'Visual Studio 17 2022' -A ${{ matrix.cmake_arch }}
           cmake --build Build/ServiceRelease --config $env:BUILD_TYPE --parallel 2
           Copy-Item Build/ServiceRelease/Binary/AirpodsBridgeService.exe Build/Release/Binary/AirpodsBridgeService.exe -Force
           Copy-Item Tools/Setup-RadioService.ps1 Build/Release/Binary/Setup-RadioService.ps1 -Force
 
-      - name: Test
+      - name: Verify deployed binary architectures and Qt 6 plugins
+        run: |
+          $expectedMachine = [Convert]::ToUInt16('${{ matrix.pe_machine }}', 16)
+          $files = @(
+            'Build/Release/Binary/AirpodsBridge.exe',
+            'Build/Release/Binary/AirpodsBridgeService.exe',
+            'Build/Release/Binary/Qt6Core.dll',
+            'Build/Release/Binary/Qt6Widgets.dll',
+            'Build/Release/Binary/imageformats/qwebp.dll',
+            'Build/Release/Binary/imageformats/qsvg.dll'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Expected deployed file missing: $file"
+            }
+            $bytes = [IO.File]::ReadAllBytes($file)
+            $peOff = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOff + 4)
+            Write-Host ("{0}: PE Machine=0x{1:X4}" -f $file, $machine)
+            if ($machine -ne $expectedMachine) {
+              throw "$file has PE machine 0x$($machine.ToString('X4')), expected ${{ matrix.pe_machine }}."
+            }
+          }
+
+      - name: Test (${{ matrix.arch }})
+        if: matrix.run_tests
         run: |
           $env:PATH = "$env:QT_ROOT_DIR/bin;$env:PATH"
           ctest --test-dir Build/Release -C $env:BUILD_TYPE --output-on-failure
 
-      - name: Sign application executable when a certificate is configured
+      - name: Sign application executables when a certificate is configured
         if: github.ref_type == 'tag'
         env:
           SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
@@ -124,7 +239,7 @@ jobs:
           $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_BASE64)
           $hasPassword = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_PASSWORD)
           if (-not $hasCertificate -and -not $hasPassword) {
-            Write-Warning 'Code-signing secrets are not configured; packaging an unsigned executable.'
+            Write-Warning 'Code-signing secrets are not configured; packaging unsigned executables.'
             exit 0
           }
           if (-not $hasCertificate -or -not $hasPassword) {
@@ -138,63 +253,69 @@ jobs:
               [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
             )
             $signTool = Get-ChildItem `
-              "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x86/signtool.exe" |
+              "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/signtool.exe" |
               Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
               Select-Object -First 1
             if (-not $signTool) {
               throw 'signtool.exe was not found on the runner.'
             }
 
-            $exePath = 'Build/Release/Binary/AirpodsBridge.exe'
-            & $signTool.FullName sign `
-              /fd SHA256 `
-              /td SHA256 `
-              /tr http://timestamp.digicert.com `
-              /f $certificatePath `
-              /p $env:SIGNING_CERTIFICATE_PASSWORD `
-              $exePath
-            if ($LASTEXITCODE -ne 0) {
-              throw "signtool sign (exe) failed with exit code $LASTEXITCODE."
-            }
+            foreach ($exePath in @(
+              'Build/Release/Binary/AirpodsBridge.exe',
+              'Build/Release/Binary/AirpodsBridgeService.exe'
+            )) {
+              & $signTool.FullName sign `
+                /fd SHA256 `
+                /td SHA256 `
+                /tr http://timestamp.digicert.com `
+                /f $certificatePath `
+                /p $env:SIGNING_CERTIFICATE_PASSWORD `
+                $exePath
+              if ($LASTEXITCODE -ne 0) {
+                throw "signtool sign ($exePath) failed with exit code $LASTEXITCODE."
+              }
 
-            & $signTool.FullName verify /pa /v $exePath
-            if ($LASTEXITCODE -ne 0) {
-              throw "signtool verify (exe) failed with exit code $LASTEXITCODE."
+              & $signTool.FullName verify /pa /v $exePath
+              if ($LASTEXITCODE -ne 0) {
+                throw "signtool verify ($exePath) failed with exit code $LASTEXITCODE."
+              }
             }
           }
           finally {
             Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Package release assets
+      - name: Package release assets (${{ matrix.platform_tag }})
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PLATFORM_TAG: ${{ matrix.platform_tag }}
         run: |
           cmake -DAPB_GENERATE_INSTALLER=ON Build/Release
           cpack --config Build/Release/CPackConfig.cmake -C $env:BUILD_TYPE
 
           $installer = Get-ChildItem `
-            Build/Release/Installer/AirpodsBridge-*-win32.exe |
+            "Build/Release/Installer/AirpodsBridge-*-$env:PLATFORM_TAG.exe" |
             Select-Object -First 1
           if (-not $installer) {
-            throw 'The NSIS installer was not generated.'
+            throw "The NSIS installer was not generated for $env:PLATFORM_TAG."
           }
 
           $portableSource =
-            "Build/Release/Installer/_CPack_Packages/win32/NSIS/AirpodsBridge-$env:VERSION-win32"
+            "Build/Release/Installer/_CPack_Packages/$env:PLATFORM_TAG/NSIS/AirpodsBridge-$env:VERSION-$env:PLATFORM_TAG"
           if (-not (Test-Path -LiteralPath $portableSource)) {
             throw "Portable package directory not found: $portableSource"
           }
 
-          New-Item -ItemType Directory -Path dist | Out-Null
-          $installerDestination = "dist/AirpodsBridge-$env:VERSION-win32.exe"
-          $portableDestination = "dist/AirpodsBridge-$env:VERSION-win32-portable.zip"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $installerDestination = "dist/AirpodsBridge-$env:VERSION-$env:PLATFORM_TAG.exe"
+          $portableDestination = "dist/AirpodsBridge-$env:VERSION-$env:PLATFORM_TAG-portable.zip"
           Copy-Item -LiteralPath $installer.FullName -Destination $installerDestination
           Compress-Archive -Path "$portableSource/*" -DestinationPath $portableDestination
 
       - name: Sign installer when a certificate is configured
         if: github.ref_type == 'tag'
         env:
+          PLATFORM_TAG: ${{ matrix.platform_tag }}
           SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
           SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
@@ -215,14 +336,14 @@ jobs:
               [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
             )
             $signTool = Get-ChildItem `
-              "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x86/signtool.exe" |
+              "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/signtool.exe" |
               Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
               Select-Object -First 1
             if (-not $signTool) {
               throw 'signtool.exe was not found on the runner.'
             }
 
-            $installer = Get-ChildItem dist/AirpodsBridge-*-win32.exe | Select-Object -First 1
+            $installer = Get-ChildItem "dist/AirpodsBridge-*-$env:PLATFORM_TAG.exe" | Select-Object -First 1
             & $signTool.FullName sign `
               /fd SHA256 `
               /td SHA256 `
@@ -243,36 +364,54 @@ jobs:
             Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Generate release checksums
-        run: |
-          Get-ChildItem dist -File |
-            Where-Object Extension -In '.exe', '.zip' |
-            Sort-Object Name |
-            ForEach-Object {
-              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-              "$hash  $($_.Name)"
-            } | Set-Content dist/SHA256SUMS.txt -Encoding ascii
-
-      - name: Upload build artifacts
+      - name: Upload architecture artifacts (${{ matrix.platform_tag }})
         uses: actions/upload-artifact@v7
         with:
-          name: AirpodsBridge-${{ steps.version.outputs.version }}-${{ github.sha }}
+          name: AirpodsBridge-${{ needs.prepare.outputs.version }}-${{ matrix.platform_tag }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  package:
+    name: Checksums & bundle
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download architecture artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: AirpodsBridge-${{ needs.prepare.outputs.version }}-win-*-${{ github.sha }}
+          merge-multiple: true
+          path: dist
+
+      - name: Generate unified SHA256SUMS.txt
+        run: |
+          cd dist
+          sha256sum AirpodsBridge-*.exe AirpodsBridge-*.zip | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: AirpodsBridge-${{ needs.prepare.outputs.version }}-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
           retention-days: 30
 
   release:
+    name: Publish release
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [prepare, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download release assets
+      - name: Download release bundle
         uses: actions/download-artifact@v8
         with:
-          name: AirpodsBridge-${{ needs.build.outputs.version }}-${{ github.sha }}
+          name: AirpodsBridge-${{ needs.prepare.outputs.version }}-${{ github.sha }}
           path: dist
 
       - name: Publish GitHub Release

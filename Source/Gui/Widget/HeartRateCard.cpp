@@ -658,7 +658,7 @@ void PopupHeartRateBar::SyncPulseAnimation()
 
 void PopupHeartRateBar::mouseMoveEvent(QMouseEvent *event)
 {
-    const QPointF pos = event->localPos();
+    const QPointF pos = event->position();
     const bool onBtn = ActionPillRect().contains(pos);
     const bool changed = (onBtn != _hoverButton) || (!onBtn != _hoverBody);
     _hoverButton = onBtn;
@@ -673,7 +673,7 @@ void PopupHeartRateBar::mousePressEvent(QMouseEvent *event)
     if (event->button() != Qt::LeftButton) {
         return;
     }
-    const bool onBtn = ActionPillRect().contains(event->localPos());
+    const bool onBtn = ActionPillRect().contains(event->position());
     _pressButton = onBtn;
     _pressBody = !onBtn;
     update();
@@ -684,7 +684,7 @@ void PopupHeartRateBar::mouseReleaseEvent(QMouseEvent *event)
     if (event->button() != Qt::LeftButton) {
         return;
     }
-    const bool onBtn = ActionPillRect().contains(event->localPos());
+    const bool onBtn = ActionPillRect().contains(event->position());
     const bool wasBtn = _pressButton;
     const bool wasBody = _pressBody;
     _pressButton = false;

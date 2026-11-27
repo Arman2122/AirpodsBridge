@@ -9,6 +9,7 @@
 #include <thread>
 
 #include <QDialog>
+#include <QEnterEvent>
 #include <QPropertyAnimation>
 
 #include "ui_MainWindow.h"
@@ -135,7 +136,7 @@ private:
 
     void DoHide(bool userDismissed = false);
     void paintEvent(QPaintEvent *event) override;
-    void enterEvent(QEvent *event) override;
+    void enterEvent(QEnterEvent *event) override;
     void leaveEvent(QEvent *event) override;
     void showEvent(QShowEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
