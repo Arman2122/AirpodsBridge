@@ -132,6 +132,12 @@ set(CPACK_SYSTEM_NAME "${APB_PACKAGE_PLATFORM}")
 
 # Qt
 #
+if (DEFINED QT_HOST_PATH AND NOT "${QT_HOST_PATH}" STREQUAL "")
+    # Normalize Windows backslashes so vcpkg's find_package() wrapper does not treat
+    # sequences like `\a` inside QT_HOST_PATH as invalid CMake string escapes.
+    file(TO_CMAKE_PATH "${QT_HOST_PATH}" QT_HOST_PATH)
+    set(QT_HOST_PATH "${QT_HOST_PATH}" CACHE PATH "Host Qt 6 path for cross-compilation" FORCE)
+endif()
 set(QT_DEFAULT_MAJOR_VERSION 6 CACHE STRING "Qt major version" FORCE)
 set(APB_QT_COMPONENTS Core Gui Widgets Svg)
 find_package(Qt6 COMPONENTS ${APB_QT_COMPONENTS} REQUIRED)

@@ -98,7 +98,7 @@ jobs:
 
       - name: Restore Qt ${{ env.QT_VERSION }} cache (${{ matrix.arch }})
         id: qt-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/Qt
           key: qt-${{ env.QT_VERSION }}-${{ matrix.arch }}-imageformats-v1
@@ -137,11 +137,12 @@ jobs:
           if (-not $qtRoot) {
             throw "Expected Qt installation matching '${{ matrix.qt_dir_glob }}' not found under $qtVersionDir"
           }
+          $qtRoot = $qtRoot.Replace('\', '/')
           "QT_ROOT_DIR=$qtRoot" >> $env:GITHUB_ENV
           Write-Host "QT_ROOT_DIR=$qtRoot"
 
           if ('${{ matrix.cross_compile }}' -eq 'true') {
-            $qtHost = Join-Path $qtVersionDir 'msvc2022_64'
+            $qtHost = (Join-Path $qtVersionDir 'msvc2022_64').Replace('\', '/')
             if (-not (Test-Path -LiteralPath $qtHost)) {
               throw "Expected Qt host installation not found at $qtHost"
             }
@@ -155,7 +156,7 @@ jobs:
           & Build/vcpkg/bootstrap-vcpkg.bat -disableMetrics
 
       - name: Restore vcpkg binary cache (${{ matrix.vcpkg_triplet }})
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/Build/vcpkg-cache
           key: vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
