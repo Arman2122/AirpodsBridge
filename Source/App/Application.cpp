@@ -150,19 +150,19 @@ void ApbApplication::EnsureRadioServiceEnabledOnStart()
 
     LOG(Info, "Control engine is not running and auto-enable is on; starting setup.");
     _trayIcon->SetRadioSetupBusy(true, tr("Starting control engine..."));
-    Core::AirPods::ServiceControlTransport::RunElevatedSetupAsync(
-        false, false,
-        [this](Core::AirPods::ServiceControlTransport::SetupOutcome outcome) {
-            QMetaObject::invokeMethod(
-                this,
-                [this, outcome = std::move(outcome)]() {
-                    if (outcome.succeeded) {
-                        _quickConnect->InvalidateCache();
-                        _trayIcon->SetRadioSetupBusy(false);
-                        const auto reconcile = [this] {
+    _audioControl->SuspendKeepAliveTemporarily();
+    _airPodsManager->SuspendBluetoothForDriverSwap();
+    QTimer::singleShot(150, this, [this] {
+        Core::AirPods::ServiceControlTransport::RunElevatedSetupAsync(
+            false, false,
+            [this](Core::AirPods::ServiceControlTransport::SetupOutcome outcome) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, outcome = std::move(outcome)]() {
+                        if (outcome.succeeded) {
                             _quickConnect->InvalidateCache();
                             _quickConnect->RefreshDevices();
-                            _airPodsManager->RebindAfterRadioChange();
+                            _airPodsManager->ResumeBluetoothAfterDriverSwap();
                             const auto f = Core::Settings::GetCurrent();
                             _airPodsManager->ApplyRadioProxyOptions(
                                 Core::AirPods::RadioProxyOptions{
@@ -172,30 +172,26 @@ void ApbApplication::EnsureRadioServiceEnabledOnStart()
                                     .virtualMicEnabled = f.radio_service_virtual_mic,
                                 });
                             _airPodsManager->ReconnectControlTransport();
-                            _trayIcon->NotifyRadioControlChanged();
-                        };
-                        QTimer::singleShot(2500, this, reconcile);
-                        QTimer::singleShot(5500, this, [this] {
-                            _airPodsManager->ReconnectControlTransport();
-                            _trayIcon->NotifyRadioControlChanged();
-                        });
-                    }
-                    else {
-                        _trayIcon->SetRadioSetupBusy(false);
-                        LOG(Info, "Auto-enable control engine did not complete: {}",
-                            outcome.message);
-                    }
-                },
-                Qt::QueuedConnection);
-        },
-        [this](int percent, std::string message) {
-            QMetaObject::invokeMethod(
-                this,
-                [this, percent, msg = QString::fromStdString(message)]() {
-                    _trayIcon->SetRadioSetupProgress(percent, msg);
-                },
-                Qt::QueuedConnection);
-        });
+                            _trayIcon->SetRadioSetupBusy(false);
+                        }
+                        else {
+                            _airPodsManager->ResumeBluetoothAfterDriverSwap();
+                            _trayIcon->SetRadioSetupBusy(false);
+                            LOG(Info, "Auto-enable control engine did not complete: {}",
+                                outcome.message);
+                        }
+                    },
+                    Qt::QueuedConnection);
+            },
+            [this](int percent, std::string message) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, percent, msg = QString::fromStdString(message)]() {
+                        _trayIcon->SetRadioSetupProgress(percent, msg);
+                    },
+                    Qt::QueuedConnection);
+            });
+    });
 #endif
 }
 
@@ -497,6 +493,34 @@ void ApbApplication::ConnectAirPodsManager()
         },
         Qt::QueuedConnection);
     connect(
+        manager, &Core::AirPods::Manager::RadioServiceStatusChanged, this,
+        [this](const Core::AirPods::RadioServiceInfo &info) {
+            _trayIcon->NotifyRadioControlChanged();
+            const bool justAttached = info.virtualAdapterAttached && !_lastVirtualAdapterAttached;
+            _lastVirtualAdapterAttached = info.virtualAdapterAttached;
+            if (justAttached) {
+                const uint64_t epoch = ++_radioReconcileEpoch;
+                QTimer::singleShot(600, this, [this, epoch] {
+                    if (_radioReconcileEpoch != epoch) {
+                        return;
+                    }
+                    _quickConnect->InvalidateCache();
+                    _quickConnect->RefreshDevices();
+                    _airPodsManager->ResumeBluetoothAfterDriverSwap();
+                    const auto f = Core::Settings::GetCurrent();
+                    _airPodsManager->ApplyRadioProxyOptions(Core::AirPods::RadioProxyOptions{
+                        .lowLatencyQos = f.radio_service_low_latency_qos,
+                        .pollLatencyUs = 25000,
+                        .declineHfp = f.radio_service_hfp_decline,
+                        .virtualMicEnabled = f.radio_service_virtual_mic,
+                    });
+                    _airPodsManager->ReconnectControlTransport();
+                    _trayIcon->NotifyRadioControlChanged();
+                });
+            }
+        },
+        Qt::QueuedConnection);
+    connect(
         manager, &Core::AirPods::Manager::ConversationAwarenessLevelChanged, this,
         [this](uint8_t level) { _audioControl->OnConversationAwarenessLevel(level); },
         Qt::QueuedConnection);
@@ -588,12 +612,13 @@ void ApbApplication::ConnectGuiComponents()
                 return;
             }
             if (action == Action::RestoreNative && _airPodsManager->RestoreNativeRadioDriver()) {
-                _airPodsManager->DisconnectControlTransport();
+                _audioControl->SuspendKeepAliveTemporarily();
+                _airPodsManager->SuspendBluetoothForDriverSwap();
                 _quickConnect->InvalidateCache();
-                _trayIcon->SetRadioSetupBusy(
-                    false, tr("Native Windows Bluetooth driver restored."));
-                QTimer::singleShot(2500, this, [this] {
-                    _airPodsManager->RebindAfterRadioChange();
+                _trayIcon->SetRadioSetupBusy(false);
+                QTimer::singleShot(1800, this, [this] {
+                    _airPodsManager->ResumeBluetoothAfterDriverSwap();
+                    _quickConnect->InvalidateCache();
                     _quickConnect->RefreshDevices();
                     _trayIcon->NotifyRadioControlChanged();
                 });
@@ -602,27 +627,32 @@ void ApbApplication::ConnectGuiComponents()
 #if defined APB_OS_WIN
             const bool uninstall = (action == Action::Uninstall);
             const bool restoreOnly = (action == Action::RestoreNative);
-            Core::AirPods::ServiceControlTransport::RunElevatedSetupAsync(
-                uninstall, restoreOnly,
-                [this, uninstall,
-                 restoreOnly](Core::AirPods::ServiceControlTransport::SetupOutcome outcome) {
-                    QMetaObject::invokeMethod(
-                        this,
-                        [this, uninstall, restoreOnly, outcome = std::move(outcome)]() {
-                            const QString msg = QString::fromStdString(outcome.message);
-                            if (outcome.succeeded) {
-                                _quickConnect->InvalidateCache();
-                                if (uninstall || restoreOnly) {
-                                    _airPodsManager->DisconnectControlTransport();
-                                }
-                                _trayIcon->SetRadioSetupBusy(false, msg);
-                                // Wait for Windows to finish enumerating the newly attached
-                                // virtual or restored native Bluetooth adapter before rebinding
-                                // WinRT device handles and reconnecting AAP.
-                                const auto reconcile = [this, uninstall, restoreOnly] {
+            // Release AirpodsBridge's own Bluetooth & WASAPI handles BEFORE DiInstallDevice runs
+            // so we never veto IRP_MN_QUERY_REMOVE_DEVICE (which otherwise causes a ~67 s Windows
+            // PnP timeout).
+            _audioControl->SuspendKeepAliveTemporarily();
+            _airPodsManager->SuspendBluetoothForDriverSwap();
+            if (uninstall || restoreOnly) {
+                _airPodsManager->DisconnectControlTransport();
+            }
+            QTimer::singleShot(150, this, [this, uninstall, restoreOnly] {
+                Core::AirPods::ServiceControlTransport::RunElevatedSetupAsync(
+                    uninstall, restoreOnly,
+                    [this, uninstall,
+                     restoreOnly](Core::AirPods::ServiceControlTransport::SetupOutcome outcome) {
+                        QMetaObject::invokeMethod(
+                            this,
+                            [this, uninstall, restoreOnly, outcome = std::move(outcome)]() {
+                                const QString msg = QString::fromStdString(outcome.message);
+                                if (outcome.succeeded) {
                                     _quickConnect->InvalidateCache();
-                                    _quickConnect->RefreshDevices();
-                                    _airPodsManager->RebindAfterRadioChange();
+                                    if (uninstall || restoreOnly) {
+                                        _airPodsManager->DisconnectControlTransport();
+                                        _lastVirtualAdapterAttached = false;
+                                    }
+                                    // Refresh immediately against live service state (not stale
+                                    // setup prose), then resume Bluetooth handles & sync options.
+                                    _airPodsManager->ResumeBluetoothAfterDriverSwap();
                                     if (!uninstall && !restoreOnly) {
                                         const auto f = Core::Settings::GetCurrent();
                                         _airPodsManager->ApplyRadioProxyOptions(
@@ -634,43 +664,46 @@ void ApbApplication::ConnectGuiComponents()
                                             });
                                         _airPodsManager->ReconnectControlTransport();
                                     }
-                                    _trayIcon->NotifyRadioControlChanged();
-                                };
-                                QTimer::singleShot(2500, this, reconcile);
-                                QTimer::singleShot(5500, this, [this, uninstall, restoreOnly] {
-                                    if (!uninstall && !restoreOnly) {
-                                        _airPodsManager->ReconnectControlTransport();
+                                    _trayIcon->SetRadioSetupBusy(false);
+                                    QTimer::singleShot(1000, this, [this, uninstall, restoreOnly] {
+                                        _quickConnect->InvalidateCache();
+                                        _quickConnect->RefreshDevices();
+                                        _airPodsManager->RebindAfterRadioChange();
+                                        if (!uninstall && !restoreOnly) {
+                                            _airPodsManager->ReconnectControlTransport();
+                                        }
+                                        _trayIcon->NotifyRadioControlChanged();
+                                    });
+                                    if (outcome.rebootRequired) {
+                                        QMessageBox::information(
+                                            nullptr, Config::ProgramName,
+                                            tr("The No-Test-Mode Control Engine was installed.\n\n"
+                                               "Restart Windows once so the signed usbip-win2 "
+                                               "driver finishes initializing."));
                                     }
-                                    _trayIcon->NotifyRadioControlChanged();
-                                });
-                                if (outcome.rebootRequired) {
-                                    QMessageBox::information(
-                                        nullptr, Config::ProgramName,
-                                        tr("The No-Test-Mode Control Engine was installed.\n\n"
-                                           "Restart Windows once so the signed usbip-win2 driver "
-                                           "finishes initializing."));
                                 }
-                            }
-                            else {
-                                _trayIcon->SetRadioSetupBusy(false, msg);
-                                if (!outcome.cancelled) {
-                                    QMessageBox::warning(
-                                        nullptr, Config::ProgramName,
-                                        tr("Control Engine setup did not complete:\n\n%1")
-                                            .arg(msg));
+                                else {
+                                    _airPodsManager->ResumeBluetoothAfterDriverSwap();
+                                    _trayIcon->SetRadioSetupBusy(false, msg);
+                                    if (!outcome.cancelled) {
+                                        QMessageBox::warning(
+                                            nullptr, Config::ProgramName,
+                                            tr("Control Engine setup did not complete:\n\n%1")
+                                                .arg(msg));
+                                    }
                                 }
-                            }
-                        },
-                        Qt::QueuedConnection);
-                },
-                [this](int percent, std::string message) {
-                    QMetaObject::invokeMethod(
-                        this,
-                        [this, percent, msg = QString::fromStdString(message)]() {
-                            _trayIcon->SetRadioSetupProgress(percent, msg);
-                        },
-                        Qt::QueuedConnection);
-                });
+                            },
+                            Qt::QueuedConnection);
+                    },
+                    [this](int percent, std::string message) {
+                        QMetaObject::invokeMethod(
+                            this,
+                            [this, percent, msg = QString::fromStdString(message)]() {
+                                _trayIcon->SetRadioSetupProgress(percent, msg);
+                            },
+                            Qt::QueuedConnection);
+                    });
+            });
 #else
             _trayIcon->SetRadioSetupBusy(false);
 #endif
@@ -709,7 +742,27 @@ void ApbApplication::ConnectGuiComponents()
                         .arg(rs.activeAapChannels > 0 ? tr("Connected") : tr("Ready"));
             }
             else if (rs.serviceRunning) {
-                info.engineDetail = tr("Starting...");
+                if (rs.stateName == "binding_winusb") {
+                    info.engineDetail = rs.winUsbBound
+                                            ? tr("Attaching virtual Bluetooth radio...")
+                                            : tr("Switching Bluetooth adapter to WinUSB...");
+                }
+                else if (rs.stateName == "restoring_native") {
+                    info.engineDetail = tr("Restoring native Bluetooth driver...");
+                }
+                else if (rs.stateName == "non_usb_adapter_only") {
+                    info.engineDetail =
+                        tr("Internal Bluetooth is UART/SDIO · Connect a USB Bluetooth adapter");
+                }
+                else if (rs.stateName == "no_usb_adapter") {
+                    info.engineDetail = tr("Waiting for a USB Bluetooth adapter...");
+                }
+                else if (rs.stateName == "preflight_missing_usbip") {
+                    info.engineDetail = tr("usbip-win2 driver not ready · Re-enable to repair");
+                }
+                else {
+                    info.engineDetail = tr("Starting...");
+                }
             }
             else if (rs.serviceInstalled) {
                 info.engineDetail = tr("Stopped");

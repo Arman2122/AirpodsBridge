@@ -644,4 +644,11 @@ void CompositeControlTransport::SetOnConnectionChanged(ConnectionCallback callba
     _onConn = std::move(callback);
 }
 
+void CompositeControlTransport::SetOnRadioStatusChanged(RadioStatusCallback callback)
+{
+    if (_primary) {
+        _primary->SetOnRadioStatusChanged(std::move(callback));
+    }
+}
+
 } // namespace Core::AirPods

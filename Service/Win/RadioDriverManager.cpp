@@ -135,7 +135,7 @@ public:
                     " Bluetooth service(s) before WinUSB swap to prevent BTH\\MS_RFCOMM "
                     "query-remove deadlock.");
             // Give BTHPORT / rfcomm.sys a brief settle window to complete TDI handle rundown.
-            Sleep(300);
+            Sleep(150);
         }
     }
 
@@ -176,12 +176,12 @@ private:
                 }
             }
         }
-        for (int i = 0; i < 40; ++i) {
+        for (int i = 0; i < 60; ++i) {
             if (!QueryServiceStatus(svc.Get(), &st) || st.dwCurrentState == SERVICE_STOPPED) {
                 _stoppedServices.emplace_back(name);
                 return;
             }
-            Sleep(100);
+            Sleep(50);
         }
         ServiceLog::Write(
             LogLevel::Warn, "driver",

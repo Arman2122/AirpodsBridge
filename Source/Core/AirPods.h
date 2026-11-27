@@ -85,6 +85,8 @@ public:
     void ReconnectControlTransport();
     void DisconnectControlTransport();
     void RebindAfterRadioChange();
+    void SuspendBluetoothForDriverSwap();
+    void ResumeBluetoothAfterDriverSwap();
 
     struct DiagnosticsSnapshot {
         QString boundDeviceName;
@@ -118,6 +120,7 @@ private:
     bool _deviceConnected{false};
     bool _aapConnected{false};
     bool _systemSuspended{false};
+    bool _driverSwapSuspended{false};
     bool _scannerWanted{false};
     bool _scanWhileDisconnected{false};
     bool _showNearbyWhenDisconnected{true};
@@ -242,6 +245,7 @@ Q_SIGNALS:
     void ScannerAvailabilityChanged(bool available);
     void DeviceConnectionChanged(bool connected);
     void ControlConnectionChanged(bool connected);
+    void RadioServiceStatusChanged(const Core::AirPods::RadioServiceInfo &info);
     // Raw AAP 0x4B Conversation Awareness ducking level (0 = restore/off, 1..2 = speaking,
     // 3..7 = gradual recovery, 8..9 = normal).
     void ConversationAwarenessLevelChanged(uint8_t level);

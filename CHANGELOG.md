@@ -48,6 +48,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     cross-compiled) with automated PE machine header and Qt 6 plugin verification (`0x8664` /
     `0xAA64`) and unified `SHA256SUMS.txt` release packaging.
 
+### Fixed
+
+- Fixed Control Engine enable/disable getting stuck on `Starting...` and stalling ~67 seconds in
+  Windows PnP driver swaps (`Service/Win/NativeSetup.cpp`, `Service/Win/RadioEngine.cpp`,
+  `Service/Win/RadioDriverManager.cpp`, `Source/Core/AirPodsTransport.h`,
+  `Source/Core/AirPodsServiceTransport_win.h/.cpp`, `Source/Core/AirPodsTransport_win.h/.cpp`,
+  `Source/Core/AirPods.h/.cpp`, `Source/App/Application.h/.cpp`):
+  - Pushes every `AirpodsBridgeService` `StatusSnapshot` transition directly over the Named Pipe to
+    `SettingsWindow` and triggers automatic radio rebind/reconnect the instant the virtual adapter
+    attaches, replacing blind fixed timers and clearing stale `winUsbBound`/`virtualAdapterAttached`
+    flags when stopped or disabled.
+  - Suspends AirpodsBridge's own WinRT BLE advertisement watcher, device handle, and WASAPI
+    keep-alive stream before driver swaps so the app never vetoes `IRP_MN_QUERY_REMOVE_DEVICE`
+    (`PNP_VetoOutstandingOpen`), eliminating the ~67-second PnP timeout during WinUSB binding.
+  - Updated `NativeSetup::RunEnable()` to track real `RadioEngine` state over the control pipe and
+    stream live sub-step progress (`Switching Bluetooth adapter to WinUSB...` → `Attaching virtual
+    Bluetooth radio...`) until the virtual radio is genuinely `running` rather than reporting
+    `100%` prematurely while `DiInstallDevice` is still in flight.
+  - Surfaced exact per-phase Control Engine status labels in **Settings → AirPods control**.
+
 ### Documentation
 
 - Published the GitHub Wiki and added issue forms for bugs, feature requests, and new device support.

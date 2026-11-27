@@ -496,7 +496,7 @@ void RadioEngine::RunTakeoverCycle()
             WaitInterruptible(decision.backoffMs);
             return;
         }
-        WaitInterruptible(400); // Allow WinUSB PnP interface to come online.
+        WaitInterruptible(100); // Brief settle for WinUSB PnP interface to come online.
         if (!_running.load() || _suspended.load() || _systemShutdown.load()) {
             return;
         }
@@ -506,16 +506,17 @@ void RadioEngine::RunTakeoverCycle()
         std::lock_guard<std::mutex> lock{_stateMutex};
         _winUsbBound = true;
     }
+    BroadcastStatus();
 
     // 2. Open WinUSB device handle & read descriptors.
     const std::wstring devPath = RadioDriverManager::DevicePathForWinUsb(adapter.instanceId);
     bool opened = false;
-    for (int attempt = 0; attempt < 10 && _running.load() && !_suspended.load(); ++attempt) {
+    for (int attempt = 0; attempt < 15 && _running.load() && !_suspended.load(); ++attempt) {
         if (_radio.Open(devPath)) {
             opened = true;
             break;
         }
-        WaitInterruptible(300);
+        WaitInterruptible(150);
     }
 
     if (!_running.load() || _suspended.load() || _systemShutdown.load()) {

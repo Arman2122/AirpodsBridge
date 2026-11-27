@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Arman2122
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+#include "Service/Protocol/ServiceProtocol.h"
 #include "Service/Win/NativeSetup.h"
 #include "Service/Win/RadioDriverManager.h"
 #include "Service/Win/RegistryStore.h"
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -441,6 +443,177 @@ std::filesystem::path TargetServiceExePath()
            L"AirpodsBridgeService.exe";
 }
 
+// Connects to the newly started AirpodsBridgeService Named Pipe and tracks real RadioEngine state
+// transitions until the virtual Bluetooth adapter is genuinely attached and `running` (or fails).
+// Prevents `RunEnable` from falsely claiming "100% active" while `BindWinUsb` is still running.
+bool WaitForEngineReady(SC_HANDLE svc, bool rebootNeeded, std::string &errOut)
+{
+    using namespace std::chrono;
+    const auto deadline = steady_clock::now() + seconds(rebootNeeded ? 8 : 90);
+
+    // 1. Wait briefly for NamedPipeServer::Start() inside the service.
+    UniqueHandle pipe;
+    while (steady_clock::now() < deadline) {
+        SERVICE_STATUS st{};
+        if (!QueryServiceStatus(svc, &st) || st.dwCurrentState == SERVICE_STOPPED ||
+            st.dwCurrentState == SERVICE_STOP_PENDING)
+        {
+            errOut = "AirpodsBridgeService stopped unexpectedly during startup.";
+            return false;
+        }
+        HANDLE h = CreateFileW(
+            Protocol::kPipeNameW, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            pipe.Reset(h);
+            break;
+        }
+        Sleep(100);
+    }
+
+    if (!pipe.Valid()) {
+        errOut = "AirpodsBridgeService started, but its control pipe did not respond in time.";
+        return false;
+    }
+
+    // 2. Send Hello so RadioEngine immediately sends its current StatusSnapshot and keeps pushing
+    //    every subsequent state transition.
+    {
+        const auto hello = Protocol::EncodeFrame(Protocol::MessageType::Hello, {});
+        UniqueHandle writeEv{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+        OVERLAPPED wov{};
+        wov.hEvent = writeEv.Get();
+        DWORD written = 0;
+        if (!WriteFile(
+                pipe.Get(), hello.data(), static_cast<DWORD>(hello.size()), &written, &wov) &&
+            GetLastError() == ERROR_IO_PENDING)
+        {
+            if (WaitForSingleObject(writeEv.Get(), 2000) == WAIT_OBJECT_0) {
+                GetOverlappedResult(pipe.Get(), &wov, &written, FALSE);
+            }
+            else {
+                CancelIoEx(pipe.Get(), &wov);
+            }
+        }
+    }
+
+    UniqueHandle readEv{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    std::array<uint8_t, 4096> chunk{};
+    std::vector<uint8_t> stream;
+    stream.reserve(8192);
+    int lastPct = 82;
+    std::string lastMsg;
+
+    const auto report = [&](int pct, const std::string &msg) {
+        if (pct != lastPct || msg != lastMsg) {
+            lastPct = pct;
+            lastMsg = msg;
+            WriteProgress("running", pct, msg);
+        }
+    };
+
+    while (steady_clock::now() < deadline) {
+        ResetEvent(readEv.Get());
+        OVERLAPPED rov{};
+        rov.hEvent = readEv.Get();
+        DWORD got = 0;
+        BOOL ok = ReadFile(pipe.Get(), chunk.data(), static_cast<DWORD>(chunk.size()), &got, &rov);
+        if (!ok) {
+            const DWORD err = GetLastError();
+            if (err == ERROR_IO_PENDING) {
+                bool timedOutAll = true;
+                while (steady_clock::now() < deadline) {
+                    const DWORD wait = WaitForSingleObject(readEv.Get(), 500);
+                    if (wait == WAIT_OBJECT_0) {
+                        ok = GetOverlappedResult(pipe.Get(), &rov, &got, FALSE);
+                        timedOutAll = false;
+                        break;
+                    }
+                    if (wait != WAIT_TIMEOUT) {
+                        CancelIoEx(pipe.Get(), &rov);
+                        GetOverlappedResult(pipe.Get(), &rov, &got, TRUE);
+                        ok = FALSE;
+                        timedOutAll = false;
+                        break;
+                    }
+                    SERVICE_STATUS st{};
+                    if (!QueryServiceStatus(svc, &st) || st.dwCurrentState == SERVICE_STOPPED) {
+                        CancelIoEx(pipe.Get(), &rov);
+                        GetOverlappedResult(pipe.Get(), &rov, &got, TRUE);
+                        errOut = "AirpodsBridgeService stopped before finishing startup.";
+                        return false;
+                    }
+                }
+                if (timedOutAll) {
+                    CancelIoEx(pipe.Get(), &rov);
+                    GetOverlappedResult(pipe.Get(), &rov, &got, TRUE);
+                    break;
+                }
+            }
+            if (!ok) {
+                errOut = "Lost connection to AirpodsBridgeService during startup.";
+                return false;
+            }
+        }
+        if (got == 0) {
+            errOut = "AirpodsBridgeService closed its control pipe during startup.";
+            return false;
+        }
+
+        stream.insert(stream.end(), chunk.begin(), chunk.begin() + got);
+        for (;;) {
+            Protocol::Frame frame{};
+            size_t consumed = 0;
+            const auto st = Protocol::TryDecodeFrame(stream, frame, consumed);
+            if (st == Protocol::DecodeStatus::NeedMoreData) {
+                break;
+            }
+            if (st == Protocol::DecodeStatus::InvalidFrame) {
+                stream.clear();
+                break;
+            }
+            stream.erase(stream.begin(), stream.begin() + static_cast<std::ptrdiff_t>(consumed));
+
+            if (frame.type != Protocol::MessageType::StatusSnapshot) {
+                continue;
+            }
+            const auto snap = Protocol::DecodeStatusSnapshot(frame.payload);
+            if (!snap.has_value()) {
+                continue;
+            }
+
+            using State = Protocol::RadioServiceState;
+            if (snap->state == State::Running && snap->virtualAdapterAttached) {
+                return true;
+            }
+            if (snap->state == State::BindingWinUsb) {
+                if (snap->winUsbBound) {
+                    report(94, "Attaching virtual Bluetooth radio...");
+                }
+                else {
+                    report(88, "Switching Bluetooth adapter to WinUSB (brief disconnect)...");
+                }
+            }
+            else if (snap->state == State::Starting) {
+                report(84, "Starting AirpodsBridge Control Engine...");
+            }
+            else if (
+                snap->state == State::GuardTripped || snap->state == State::NonUsbAdapterOnly ||
+                snap->state == State::NoUsbAdapter || snap->state == State::PreflightMissingUsbip)
+            {
+                errOut = snap->detail.empty()
+                             ? "Control Engine could not initialize the Bluetooth adapter."
+                             : snap->detail;
+                return false;
+            }
+        }
+    }
+
+    errOut = "Control Engine did not finish attaching the virtual Bluetooth radio in time. "
+             "See C:\\ProgramData\\AirpodsBridge\\RadioService.log.";
+    return false;
+}
+
 } // namespace
 
 int NativeSetup::RunEnable()
@@ -562,22 +735,26 @@ int NativeSetup::RunEnable()
     RegistryStore::SetUninstalling(false);
     RegistryStore::SetGuardTripped(false);
 
-    WriteProgress("running", 90, "Starting AirpodsBridge Control Engine...");
+    WriteProgress("running", 82, "Starting AirpodsBridge Control Engine...");
     if (!StartServiceW(svc.Get(), 0, nullptr)) {
         const DWORD startErr = GetLastError();
         if (startErr != ERROR_SERVICE_ALREADY_RUNNING) {
             WriteProgress("error", 100, "Failed to start service: " + FormatWin32Error(startErr));
+            ServiceLog::Shutdown();
             return 1;
         }
     }
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 40; ++i) {
         SERVICE_STATUS st{};
         if (QueryServiceStatus(svc.Get(), &st) && st.dwCurrentState == SERVICE_RUNNING) {
             break;
         }
-        Sleep(250);
+        Sleep(100);
     }
+
+    std::string readyErr;
+    const bool engineReady = WaitForEngineReady(svc.Get(), rebootNeeded, readyErr);
 
     if (rebootNeeded) {
         WriteProgress(
@@ -586,6 +763,12 @@ int NativeSetup::RunEnable()
             "hubs.");
         ServiceLog::Shutdown();
         return 3010;
+    }
+
+    if (!engineReady) {
+        WriteProgress("error", 100, readyErr);
+        ServiceLog::Shutdown();
+        return 1;
     }
 
     WriteProgress(

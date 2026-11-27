@@ -318,13 +318,24 @@ std::optional<RadioServiceInfo> ServiceControlTransport::GetRadioServiceInfo() c
     info.serviceInstalled = installed;
     info.serviceRunning = running;
     info.pipeConnected = _pipeConnected.load();
-    if (!installed) {
-        info.stateName = "not_installed";
-        info.detail = "Radio service is not installed (BLE Broadcast mode active).";
-    }
-    else if (!running) {
-        info.stateName = "stopped";
-        info.detail = "AirpodsBridgeService is installed but not running.";
+    if (!installed || !running) {
+        // Never leak stale live flags from a prior service session once stopped or uninstalled.
+        info.pipeConnected = false;
+        info.winUsbBound = false;
+        info.virtualAdapterAttached = false;
+        info.guardTripped = false;
+        info.callAudioActive = false;
+        info.virtualMicAttached = false;
+        info.virtualMicCapturing = false;
+        info.activeAapChannels = 0;
+        if (!installed) {
+            info.stateName = "not_installed";
+            info.detail = "Radio service is not installed (BLE Broadcast mode active).";
+        }
+        else {
+            info.stateName = "stopped";
+            info.detail = "AirpodsBridgeService is installed but not running.";
+        }
     }
     return info;
 }
@@ -392,6 +403,12 @@ void ServiceControlTransport::SetOnConnectionChanged(ConnectionCallback callback
 {
     std::lock_guard<std::mutex> lock{_callbackMutex};
     _onConnectionChanged = std::move(callback);
+}
+
+void ServiceControlTransport::SetOnRadioStatusChanged(RadioStatusCallback callback)
+{
+    std::lock_guard<std::mutex> lock{_callbackMutex};
+    _onRadioStatusChanged = std::move(callback);
 }
 
 bool ServiceControlTransport::EnsurePipeConnected()
@@ -555,6 +572,34 @@ void ServiceControlTransport::ReaderLoop(HANDLE pipeHandle, HANDLE stopEvent)
     if (_aapConnected.exchange(false)) {
         NotifyConnectionChanged(false);
     }
+
+    // Push a live status update so the UI clears stale "Active"/"Starting" text immediately
+    // when the service stops or restarts rather than waiting for a timer.
+    const auto [installed, running] = QueryScmServiceState();
+    RadioServiceInfo info{};
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        _lastInfo.serviceInstalled = installed;
+        _lastInfo.serviceRunning = running;
+        _lastInfo.pipeConnected = false;
+        _lastInfo.virtualAdapterAttached = false;
+        _lastInfo.activeAapChannels = 0;
+        _lastInfo.virtualMicAttached = false;
+        _lastInfo.virtualMicCapturing = false;
+        if (!installed) {
+            _lastInfo.winUsbBound = false;
+            _lastInfo.guardTripped = false;
+            _lastInfo.stateName = "not_installed";
+            _lastInfo.detail = "Radio service is not installed (BLE Broadcast mode active).";
+        }
+        else if (!running) {
+            _lastInfo.winUsbBound = false;
+            _lastInfo.stateName = "stopped";
+            _lastInfo.detail = "AirpodsBridgeService is installed but not running.";
+        }
+        info = _lastInfo;
+    }
+    NotifyRadioStatusChanged(std::move(info));
 }
 
 void ServiceControlTransport::HandleInboundFrame(uint16_t rawType, std::span<const uint8_t> payload)
@@ -564,31 +609,36 @@ void ServiceControlTransport::HandleInboundFrame(uint16_t rawType, std::span<con
 
     if (type == MessageType::StatusSnapshot) {
         if (const auto snap = Service::Protocol::DecodeStatusSnapshot(payload); snap.has_value()) {
-            std::lock_guard<std::mutex> lock{_mutex};
-            _lastInfo.serviceInstalled = true;
-            _lastInfo.serviceRunning = true;
-            _lastInfo.pipeConnected = true;
-            _lastInfo.usbipDriverReady = snap->usbipDriverReady;
-            _lastInfo.winUsbBound = snap->winUsbBound;
-            _lastInfo.virtualAdapterAttached = snap->virtualAdapterAttached;
-            _lastInfo.guardTripped = snap->guardTripped;
-            _lastInfo.callAudioActive = snap->callAudioActive;
-            _lastInfo.virtualMicAttached = snap->virtualMicAttached;
-            _lastInfo.virtualMicCapturing = snap->virtualMicCapturing;
-            _lastInfo.lowLatencyQosEnabled = snap->lowLatencyQosEnabled;
-            _lastInfo.declineHfpEnabled = snap->declineHfpEnabled;
-            _lastInfo.adapterVid = snap->adapterVid;
-            _lastInfo.adapterPid = snap->adapterPid;
-            _lastInfo.hciManufacturer = snap->hciManufacturer;
-            _lastInfo.activeAapChannels = snap->activeAapChannels;
-            _lastInfo.activePollLatencyUs = snap->activePollLatencyUs;
-            _lastInfo.recentFailures = snap->recentFailures;
-            _lastInfo.injectedPackets = snap->injectedPackets;
-            _lastInfo.interceptedPackets = snap->interceptedPackets;
-            _lastInfo.stateName = Service::Protocol::ToString(snap->state);
-            _lastInfo.adapterDisplayName = snap->adapterDisplayName;
-            _lastInfo.adapterInstanceId = snap->adapterInstanceId;
-            _lastInfo.detail = snap->detail;
+            RadioServiceInfo updated{};
+            {
+                std::lock_guard<std::mutex> lock{_mutex};
+                _lastInfo.serviceInstalled = true;
+                _lastInfo.serviceRunning = true;
+                _lastInfo.pipeConnected = true;
+                _lastInfo.usbipDriverReady = snap->usbipDriverReady;
+                _lastInfo.winUsbBound = snap->winUsbBound;
+                _lastInfo.virtualAdapterAttached = snap->virtualAdapterAttached;
+                _lastInfo.guardTripped = snap->guardTripped;
+                _lastInfo.callAudioActive = snap->callAudioActive;
+                _lastInfo.virtualMicAttached = snap->virtualMicAttached;
+                _lastInfo.virtualMicCapturing = snap->virtualMicCapturing;
+                _lastInfo.lowLatencyQosEnabled = snap->lowLatencyQosEnabled;
+                _lastInfo.declineHfpEnabled = snap->declineHfpEnabled;
+                _lastInfo.adapterVid = snap->adapterVid;
+                _lastInfo.adapterPid = snap->adapterPid;
+                _lastInfo.hciManufacturer = snap->hciManufacturer;
+                _lastInfo.activeAapChannels = snap->activeAapChannels;
+                _lastInfo.activePollLatencyUs = snap->activePollLatencyUs;
+                _lastInfo.recentFailures = snap->recentFailures;
+                _lastInfo.injectedPackets = snap->injectedPackets;
+                _lastInfo.interceptedPackets = snap->interceptedPackets;
+                _lastInfo.stateName = Service::Protocol::ToString(snap->state);
+                _lastInfo.adapterDisplayName = snap->adapterDisplayName;
+                _lastInfo.adapterInstanceId = snap->adapterInstanceId;
+                _lastInfo.detail = snap->detail;
+                updated = _lastInfo;
+            }
+            NotifyRadioStatusChanged(std::move(updated));
         }
         return;
     }
@@ -633,6 +683,18 @@ void ServiceControlTransport::NotifyConnectionChanged(bool connected)
     }
     if (cb) {
         cb(connected);
+    }
+}
+
+void ServiceControlTransport::NotifyRadioStatusChanged(RadioServiceInfo info)
+{
+    RadioStatusCallback cb;
+    {
+        std::lock_guard<std::mutex> lock{_callbackMutex};
+        cb = _onRadioStatusChanged;
+    }
+    if (cb) {
+        cb(std::move(info));
     }
 }
 

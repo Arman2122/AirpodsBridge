@@ -114,7 +114,9 @@ private:
     bool _nativeToastNotifications{true};
     bool _updateCheckEnabled{false};
     bool _trayWelcomePending{false};
+    bool _lastVirtualAdapterAttached{false};
     uint64_t _codecReconnectEpoch{0};
+    uint64_t _radioReconcileEpoch{0};
 
     void InitSettings(Core::Settings::LoadResult loadResult);
     void FirstTimeUse();

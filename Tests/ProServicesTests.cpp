@@ -63,6 +63,16 @@ public:
     {
         _onConn = std::move(cb);
     }
+    void SetOnRadioStatusChanged(RadioStatusCallback cb) override
+    {
+        _onRadioStatus = std::move(cb);
+    }
+    void EmitRadioStatus(Core::AirPods::RadioServiceInfo info)
+    {
+        if (_onRadioStatus) {
+            _onRadioStatus(std::move(info));
+        }
+    }
 
     uint64_t lastAddress{0};
     std::vector<std::vector<uint8_t>> sentPackets;
@@ -73,6 +83,7 @@ private:
     bool _connected{false};
     PacketCallback _onPkt;
     ConnectionCallback _onConn;
+    RadioStatusCallback _onRadioStatus;
 };
 
 } // namespace
@@ -88,6 +99,7 @@ private Q_SLOTS:
     void LatencyDiagnosticsAndDefaults();
     void ParsesElevatedNativeLatencyProfileOpts();
     void CompositeTransportPrefersPrimaryAndFallsBack();
+    void CompositeTransportForwardsRadioStatusUpdates();
     void NamedPipeIpcRoundTrips();
 };
 
@@ -220,6 +232,45 @@ void ProServicesTests::CompositeTransportPrefersPrimaryAndFallsBack()
         QVERIFY(composite.IsConnected());
         QCOMPARE(fallbackPtr->lastAddress, 0xAABBCCDDEEFFull);
     }
+}
+
+void ProServicesTests::CompositeTransportForwardsRadioStatusUpdates()
+{
+    using Core::AirPods::CompositeControlTransport;
+    using Core::AirPods::RadioServiceInfo;
+
+    auto primary = std::make_unique<FakeControlTransport>("radio_service", true);
+    auto fallback = std::make_unique<FakeControlTransport>("kmdf_l2cap", true);
+    auto *primaryPtr = primary.get();
+
+    CompositeControlTransport composite{std::move(primary), std::move(fallback)};
+    std::vector<std::string> states;
+    bool sawAttached = false;
+    composite.SetOnRadioStatusChanged([&](RadioServiceInfo info) {
+        states.push_back(info.stateName);
+        if (info.virtualAdapterAttached) {
+            sawAttached = true;
+        }
+    });
+
+    RadioServiceInfo binding{};
+    binding.serviceInstalled = true;
+    binding.serviceRunning = true;
+    binding.stateName = "binding_winusb";
+    primaryPtr->EmitRadioStatus(binding);
+
+    RadioServiceInfo running{};
+    running.serviceInstalled = true;
+    running.serviceRunning = true;
+    running.winUsbBound = true;
+    running.virtualAdapterAttached = true;
+    running.stateName = "running";
+    primaryPtr->EmitRadioStatus(running);
+
+    QCOMPARE(states.size(), size_t{2});
+    QCOMPARE(states[0], std::string{"binding_winusb"});
+    QCOMPARE(states[1], std::string{"running"});
+    QVERIFY(sawAttached);
 }
 
 void ProServicesTests::NamedPipeIpcRoundTrips()

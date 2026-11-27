@@ -102,6 +102,7 @@ public:
 
     void SetOnPacketReceived(PacketCallback callback) override;
     void SetOnConnectionChanged(ConnectionCallback callback) override;
+    void SetOnRadioStatusChanged(RadioStatusCallback callback) override;
 
 private:
     ControlTransport *ActiveBackend() const;

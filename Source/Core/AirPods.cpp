@@ -107,6 +107,11 @@ Manager::Manager(QObject *parent, std::unique_ptr<ControlTransport> controlTrans
         [this](bool connected) { OnControlConnectionChanged(connected); });
     _controlTransport->SetOnPacketReceived(
         [this](std::vector<uint8_t> packet) { OnControlPacketReceived(packet); });
+    _controlTransport->SetOnRadioStatusChanged([this](RadioServiceInfo info) {
+        QMetaObject::invokeMethod(
+            this, [this, info = std::move(info)] { emit RadioServiceStatusChanged(info); },
+            Qt::QueuedConnection);
+    });
 
     // Callbacks acquire `_mutex` internally and ALWAYS release it before emitting signals.
     _adWatcher.CbReceived() +=
@@ -124,6 +129,7 @@ Manager::~Manager()
     if (_heartRateWanted && _aapConnected && _controlTransport->IsConnected()) {
         StopHeartRateWire(false);
     }
+    _controlTransport->SetOnRadioStatusChanged({});
     _controlTransport->SetOnPacketReceived({});
     _controlTransport->SetOnConnectionChanged({});
     _controlTransport->Disconnect();
@@ -138,7 +144,7 @@ Manager::~Manager()
 
 bool Manager::ShouldScan() const
 {
-    if (_systemSuspended) {
+    if (_systemSuspended || _driverSwapSuspended) {
         return false;
     }
     // When an AAP control link is live, battery, ear detection and listening mode arrive
@@ -994,6 +1000,35 @@ void Manager::RebindAfterRadioChange()
     if (addr != 0) {
         LOG(Info, "Rebinding Bluetooth device handle after radio driver change.");
         OnBoundDeviceAddressChanged(addr);
+    }
+}
+
+void Manager::SuspendBluetoothForDriverSwap()
+{
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        if (_driverSwapSuspended) {
+            return;
+        }
+        _driverSwapSuspended = true;
+        _boundDevice.reset();
+    }
+    LOG(Info, "Suspending Bluetooth scanner and device handles for radio driver swap.");
+    StopScanner();
+}
+
+void Manager::ResumeBluetoothAfterDriverSwap()
+{
+    bool wasSuspended = false;
+    {
+        std::lock_guard<std::mutex> lock{_mutex};
+        wasSuspended = _driverSwapSuspended;
+        _driverSwapSuspended = false;
+    }
+    if (wasSuspended) {
+        LOG(Info, "Resuming Bluetooth scanner and device handles after radio driver swap.");
+        RebindAfterRadioChange();
+        ReconcileScannerLater();
     }
 }
 

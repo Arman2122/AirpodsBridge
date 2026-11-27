@@ -70,6 +70,7 @@ public:
 
     void SetOnPacketReceived(PacketCallback callback) override;
     void SetOnConnectionChanged(ConnectionCallback callback) override;
+    void SetOnRadioStatusChanged(RadioStatusCallback callback) override;
 
 private:
     bool EnsurePipeConnected();
@@ -78,12 +79,14 @@ private:
     void ReaderLoop(HANDLE pipeHandle, HANDLE stopEvent);
     void HandleInboundFrame(uint16_t rawType, std::span<const uint8_t> payload);
     void NotifyConnectionChanged(bool connected);
+    void NotifyRadioStatusChanged(RadioServiceInfo info);
 
     mutable std::mutex _mutex;
     mutable std::mutex _writeMutex;
     mutable std::mutex _callbackMutex;
     PacketCallback _onPacketReceived;
     ConnectionCallback _onConnectionChanged;
+    RadioStatusCallback _onRadioStatusChanged;
 
     HANDLE _pipeHandle{INVALID_HANDLE_VALUE};
     HANDLE _stopEvent{nullptr};

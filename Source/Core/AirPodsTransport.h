@@ -66,6 +66,7 @@ class ControlTransport
 public:
     using PacketCallback = std::function<void(std::vector<uint8_t>)>;
     using ConnectionCallback = std::function<void(bool connected)>;
+    using RadioStatusCallback = std::function<void(RadioServiceInfo)>;
 
     virtual ~ControlTransport() = default;
 
@@ -106,6 +107,7 @@ public:
 
     virtual void SetOnPacketReceived(PacketCallback callback) = 0;
     virtual void SetOnConnectionChanged(ConnectionCallback callback) = 0;
+    virtual void SetOnRadioStatusChanged(RadioStatusCallback) {}
 };
 
 //
